@@ -1,0 +1,77 @@
+[
+    {
+        "frage": "Der Film 'Titanic' gewann 11 Oscars.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Titanic gewann 1998 elf Oscars - genauso viele wie 'Ben Hur' und 'Der Herr der Ringe: Die Rückkehr des Königs'."
+    },
+    {
+        "frage": "Die Beatles kommen aus London.",
+        "antwort": false,
+        "erklaerung": "Falsch! Die Beatles kommen aus Liverpool, nicht aus London."
+    },
+    {
+        "frage": "Cristiano Ronaldo hat den Champions-League-Titel öfter gewonnen als Lionel Messi.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Ronaldo hat 5 Titel, Messi hat 4."
+    },
+    {
+        "frage": "Im Film 'Star Wars' ist Darth Vader der Vater von Luke Skywalker.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Eine der berühmtesten Filmszenen aller Zeiten: 'Ich bin dein Vater!'"
+    },
+    {
+        "frage": "Die Band 'Queen' wurde in den 1980er Jahren gegründet.",
+        "antwort": false,
+        "erklaerung": "Falsch! Queen wurde 1970 in London gegründet."
+    },
+    {
+        "frage": "Eine Fußball-Halbzeit dauert 45 Minuten.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Eine reguläre Halbzeit dauert 45 Minuten plus Nachspielzeit."
+    },
+    {
+        "frage": "Der Schauspieler Leonardo DiCaprio hat seinen ersten Oscar für 'Titanic' bekommen.",
+        "antwort": false,
+        "erklaerung": "Falsch! Er bekam seinen ersten Oscar erst 2016 für 'The Revenant'."
+    },
+    {
+        "frage": "Michael Jackson wurde 'King of Pop' genannt.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Michael Jackson trug diesen Spitznamen ab den 1980ern."
+    },
+    {
+        "frage": "Der Film 'Avatar' war lange Zeit der erfolgreichste Film aller Zeiten.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Avatar (2009) war jahrelang die Nummer 1 an den Kinokassen."
+    },
+    {
+        "frage": "Beim Basketball gibt es 5 Spieler pro Mannschaft auf dem Feld.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Jede Basketball-Mannschaft hat 5 Spieler auf dem Feld."
+    },
+    {
+        "frage": "Die Rockband 'AC/DC' kommt aus den USA.",
+        "antwort": false,
+        "erklaerung": "Falsch! AC/DC ist eine australische Rockband, gegründet 1973 in Sydney."
+    },
+    {
+        "frage": "Im Film 'Der Pate' spielt Marlon Brando die Hauptrolle.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Marlon Brando spielt Don Vito Corleone in 'Der Pate' (1972)."
+    },
+    {
+        "frage": "Tennis-Spieler Roger Federer hat mehr Grand-Slam-Titel als Rafael Nadal.",
+        "antwort": false,
+        "erklaerung": "Falsch! Nadal hat 22 Grand Slams, Federer hat 20."
+    },
+    {
+        "frage": "Der Sänger Elvis Presley wurde 'King of Rock and Roll' genannt.",
+        "antwort": true,
+        "erklaerung": "Stimmt! Elvis ist bis heute als King of Rock and Roll bekannt."
+    },
+    {
+        "frage": "Im Film 'Harry Potter' geht Harry zur Schule namens 'Beauxbatons'.",
+        "antwort": false,
+        "erklaerung": "Falsch! Harry geht nach Hogwarts. Beauxbatons ist die französische Zaubererschule."
+    }
+]
