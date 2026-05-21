@@ -184,7 +184,7 @@ class QuizServer:
             failed = []
 
             with self.lock:
-                for sid, info in self.peers.items():
+                for sid, info in self.peers.items(): #sid = Server-ID
                     if now - info["last_seen"] > TIMEOUT_SEC:
                         failed.append(sid)
 
@@ -211,7 +211,7 @@ class QuizServer:
         with self.lock:
             players_copy = dict(self.game_state["players"])
         for name, info in players_copy.items():
-            send_msg("127.0.0.1", info["port"], message)
+        send_msg("127.0.0.1", info["port"], message)
 
     def _sync_to_backups(self):
         """Sendet den aktuellen Spielzustand an alle Backup-Server."""
@@ -240,7 +240,7 @@ class QuizServer:
                 print(f"\n[Quiz] 🎯 {num_players} Spieler bereit. Starte das Spiel!")
                 self._start_game()
 
-    def _start_game(self):
+    def _start_game(self): #TODO: bei random shuffle auch gegeben, dass bei server fail nicht gleiche fragen kommen
         """Stellt nacheinander alle Fragen."""
         random.shuffle(self.questions)
         self._play_questions(start_idx=0)
@@ -366,7 +366,7 @@ class QuizServer:
     # NACHRICHTEN EMPFANGEN
     # ─────────────────────────────────────────
 
-    def handle_message(self, conn):
+    def handle_message(self, conn): #TODO: Beschreibung hinzufügen
         try:
             conn.settimeout(3)
             data = conn.recv(16384)
@@ -387,7 +387,7 @@ class QuizServer:
         finally:
             conn.close()
 
-    def _process(self, msg):
+    def _process(self, msg): #TODO: Beschreibung hinzufügen
         t = msg.get("type")
 
         # ─── Server ↔ Server ───
