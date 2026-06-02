@@ -14,6 +14,7 @@ import json
 import time
 import random
 import os
+import uuid
 
 # ─────────────────────────────────────────────
 # KONFIGURATION
@@ -51,7 +52,7 @@ def send_msg(host, port, data: dict):
 
 class QuizServer:
     def __init__(self):
-        self.server_id   = random.randint(1000, 9999)
+        self.server_id = str(uuid.uuid4())
         self.port        = self._find_free_port()
 
         self.leader_id   = None
@@ -345,13 +346,22 @@ class QuizServer:
             antworten = dict(self.game_state["answers_this_round"])
             korrekt = frage["antwort"]
 
-            for player_name, antwort in antworten.items():
-                if antwort == korrekt:
-                    if player_name in self.game_state["players"]:
-                        self.game_state["players"][player_name]["score"] += 1
+            for uid, antwort in antworten.items():
+                if uid in self.game_state["players"]:
+                    if antwort == korrekt:
+                        self.game_state["players"][uid]["score"] += 1
+
+            antworten_by_name = {
+                self.game_state["players"][uid]["name"]: antwort
+                for uid, antwort in antworten.items()
+                if uid in self.game_state["players"]
+            }
 
             rangliste = sorted(
-                [(name, info["score"]) for name, info in self.game_state["players"].items()],
+                [
+                    (info["name"], info["score"])
+                    for info in self.game_state["players"].values()
+                ],
                 key=lambda x: x[1],
                 reverse=True
             )
@@ -365,7 +375,7 @@ class QuizServer:
             "type": "question_result",
             "correct_answer": korrekt,
             "explanation": frage["erklaerung"],
-            "your_answers": antworten,
+            "your_answers": antworten_by_name,
             "leaderboard": rangliste
         })
         self._sync_to_backups()
@@ -375,7 +385,7 @@ class QuizServer:
         with self.lock:
             self.game_state["phase"] = "finished"
             rangliste = sorted(
-                [(name, info["score"]) for name, info in self.game_state["players"].items()],
+                [(info["name"], info["score"]) for info in self.game_state["players"].values()],
                 key=lambda x: x[1],
                 reverse=True
             )
@@ -391,6 +401,20 @@ class QuizServer:
             "leaderboard": rangliste
         })
         self._sync_to_backups()
+
+        time.sleep(10)
+        with self.lock:
+            if self.game_state["phase"] == "finished":
+                self.game_state = {
+                    "phase": "lobby",
+                    "players": {},
+                    "current_question_idx": -1,
+                    "current_question": None,
+                    "answers_this_round": {},
+                    "question_start_time": 0
+                }
+                print(f"[Quiz] 🔄 Spiel zurückgesetzt — warte auf neue Spieler...")
+                self._sync_to_backups()
 
     # ─────────────────────────────────────────
     # NACHRICHTEN EMPFANGEN
@@ -491,14 +515,30 @@ class QuizServer:
             client_port = msg["client_port"]
 
             with self.lock:
-                if player_name in self.game_state["players"]:
-                    send_msg("127.0.0.1", client_port, {
-                        "type": "join_failed",
-                        "reason": "Name bereits vergeben."
-                    })
-                    return
+                if self.game_state["phase"] == "finished":
+                    self.game_state = {
+                        "phase": "lobby",
+                        "players": {},
+                        "current_question_idx": -1,
+                        "current_question": None,
+                        "answers_this_round": {},
+                        "question_start_time": 0
+                    }
+                    print(f"[Quiz] 🔄 Neues Spiel gestartet (Spieler hat sich verbunden)")
 
-                self.game_state["players"][player_name] = {
+                for p in self.game_state["players"].values():
+                    if p["name"] == player_name:
+                        send_msg("127.0.0.1", client_port, {
+                            "type": "join_failed",
+                            "reason": "Name bereits vergeben."
+                        })
+                        return
+
+                player_uid = str(uuid.uuid4())
+
+                self.game_state["players"][player_uid] = {
+                    "name": player_name,
+                    "uid": player_uid,
                     "port": client_port,
                     "host": msg.get("client_host", "127.0.0.1"),
                     "score": 0
@@ -535,9 +575,15 @@ class QuizServer:
             with self.lock:
                 if self.game_state["phase"] != "question":
                     return
-                if player_name not in self.game_state["players"]:
+                player_uid = None
+                for uid, p in self.game_state["players"].items():
+                    if p["name"] == player_name:
+                        player_uid = uid
+                        break
+                if player_uid is None:
                     return
-                self.game_state["answers_this_round"][player_name] = answer
+
+                self.game_state["answers_this_round"][player_uid] = answer
 
             print(f"[Quiz] 📝 {player_name} hat geantwortet: {'WAHR' if answer else 'FALSCH'}")
 
