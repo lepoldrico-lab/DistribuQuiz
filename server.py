@@ -276,6 +276,16 @@ class QuizServer:
         random.shuffle(self.questions)
         self._play_questions(start_idx=0)
 
+    def _get_own_host(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
     def _continue_game(self):
         """Wird von einem neu gewählten Quiz Master aufgerufen."""
         idx = self.game_state["current_question_idx"]
@@ -286,7 +296,9 @@ class QuizServer:
 
         self._broadcast_to_players({
             "type": "server_failover",
-            "message": "Quiz Master ist ausgefallen — neuer Quiz Master übernimmt!"
+            "message": "Quiz Master ist ausgefallen — neuer Quiz Master übernimmt!",
+            "leader_port": self.port,
+            "leader_host": self._get_own_host()
         })
 
         time.sleep(2)

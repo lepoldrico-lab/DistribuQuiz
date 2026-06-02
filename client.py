@@ -131,6 +131,10 @@ class QuizClient:
 
         elif t == "server_failover":
             print(f"\n🛡️  {msg['message']}")
+            if msg.get("leader_port"):
+                self.server_port = msg["leader_port"]
+                self.server_host = msg.get("leader_host", self.server_host)
+                print(f"   Verbinde mit neuem Quiz Master auf Port {self.server_port}...")
             print(f"   Spiel wird fortgesetzt...\n")
 
         elif t == "game_over":
