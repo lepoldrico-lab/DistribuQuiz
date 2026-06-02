@@ -27,6 +27,7 @@ CLIENT_BASE_PORT = 60000      # Clients hören auf Ports 60000, 60001, ...
 class QuizClient:
     def __init__(self):
         self.player_name  = None
+        self.server_host = None
         self.client_port  = self._find_free_port()
         self.server_port  = None       # Port des aktuellen Quiz Masters
         self.current_question = None
@@ -57,6 +58,7 @@ class QuizClient:
                     resp = s.recv(1024)
                     data = json.loads(resp.decode())
                     if data.get("leader_port"):
+                        self.server_host = data.get("leader_host", "127.0.0.1")
                         return data["leader_port"]
             except Exception:
                 continue
@@ -67,7 +69,7 @@ class QuizClient:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(3)
-                s.connect(("127.0.0.1", self.server_port))
+                s.connect((self.server_host, self.server_port))
                 s.sendall(json.dumps(data).encode())
             return True
         except Exception:
@@ -81,7 +83,7 @@ class QuizClient:
         """Hört auf Nachrichten vom Server (in eigenem Thread)."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", self.client_port))
+        sock.bind(("0.0.0.0", self.client_port))
         sock.listen(5)
 
         while True:
@@ -113,6 +115,7 @@ class QuizClient:
         elif t == "redirect":
             # Quiz Master hat sich geändert
             self.server_port = msg["leader_port"]
+            self.server_host = msg.get("leader_host", self.server_host)
             print(f"\n🔄 Verbinde neu mit Quiz Master auf Port {self.server_port}")
 
         elif t == "player_joined":
@@ -227,7 +230,16 @@ class QuizClient:
                 print(f"     Warte auf andere Spieler...")
             else:
                 print(f"  ❌ Antwort konnte nicht gesendet werden!")
-
+    
+    def get_local_ip(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except:
+            return "127.0.0.1"
+        finally:
+            s.close()
     # ─────────────────────────────────────────
     # START
     # ─────────────────────────────────────────
@@ -264,6 +276,7 @@ class QuizClient:
         print(f"\n📤 Trete dem Quiz bei als '{self.player_name}'...")
         self.send_to_server({
             "type": "join_game",
+            "client_host": self.get_local_ip(),
             "player_name": self.player_name,
             "client_port": self.client_port
         })

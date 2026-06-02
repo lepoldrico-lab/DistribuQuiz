@@ -19,6 +19,7 @@ import os
 # KONFIGURATION
 # ─────────────────────────────────────────────
 
+DISCOVERY_PORT  = 55000
 BASE_PORT       = 50100       # Server laufen auf Ports 50100, 50101, ...
 HEARTBEAT_SEC   = 2           # Alle 2 Sek: "Ich lebe noch!"
 TIMEOUT_SEC     = 15          # Nach 15 Sek ohne Signal: Server ausgefallen
@@ -103,24 +104,53 @@ class QuizServer:
     # ─────────────────────────────────────────
 
     def broadcast_presence(self):
-        """Klopft an alle bekannten Ports und stellt sich vor."""
-        print(f"[Discovery] Suche andere Server...")
+        print("[Discovery] Suche Server im Netzwerk...")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(2)
+
+        discovery_msg = {
+            "type": "discover_server"
+        }
+
+        sock.sendto(
+            json.dumps(discovery_msg).encode(),
+            ("255.255.255.255", DISCOVERY_PORT)
+        )
+
         found = 0
-        for port in range(BASE_PORT, BASE_PORT + 20):
-            if port == self.port:
-                continue
-            if send_msg("127.0.0.1", port, {
-                "type": "hello",
-                "server_id": self.server_id,
-                "port": self.port
-            }):
+
+        while True:
+            try:
+                data, addr = sock.recvfrom(4096)
+                msg = json.loads(data.decode())
+
+                sid = msg["server_id"]
+
+                if sid == self.server_id:
+                    continue
+
+                with self.lock:
+                    self.peers[sid] = {
+                        "port": msg["port"],
+                        "host": addr[0],
+                        "last_seen": time.time()
+                    }
+
                 found += 1
 
-        if found == 0:
-            print(f"[Discovery] Kein anderer Server gefunden — ich bin allein.")
-        else:
-            print(f"[Discovery] {found} andere Server kontaktiert.")
+                print(
+                    f"[Discovery] Server gefunden: "
+                    f"ID={sid} "
+                    f"IP={addr[0]} "
+                    f"Port={msg['port']}"
+                )
 
+            except socket.timeout:
+                break
+
+        print(f"[Discovery] {found} Server gefunden")
     # ─────────────────────────────────────────
     # VOTING: Bully-Algorithmus
     # ─────────────────────────────────────────
@@ -153,7 +183,7 @@ class QuizServer:
 
         with self.lock:
             for sid, info in self.peers.items():
-                send_msg("127.0.0.1", info["port"], {
+                send_msg(info["host"], info["port"], {
                     "type": "new_leader",
                     "leader_id": winner_id,
                     "leader_port": winner_port
@@ -170,7 +200,7 @@ class QuizServer:
             with self.lock:
                 peers_copy = dict(self.peers)
             for sid, info in peers_copy.items():
-                send_msg("127.0.0.1", info["port"], {
+                send_msg(info["host"], info["port"], {
                     "type": "heartbeat",
                     "server_id": self.server_id,
                     "port": self.port
@@ -211,7 +241,7 @@ class QuizServer:
         with self.lock:
             players_copy = dict(self.game_state["players"])
         for name, info in players_copy.items():
-            send_msg("127.0.0.1", info["port"], message)
+            send_msg(info["host"], info["port"], message)
 
     def _sync_to_backups(self):
         """Sendet den aktuellen Spielzustand an alle Backup-Server."""
@@ -219,7 +249,7 @@ class QuizServer:
             state_copy = json.loads(json.dumps(self.game_state))
             peers_copy = dict(self.peers)
         for sid, info in peers_copy.items():
-            send_msg("127.0.0.1", info["port"], {
+            send_msg(info["host"], info["port"], {
                 "type": "state_sync",
                 "game_state": state_copy
             })
@@ -366,7 +396,7 @@ class QuizServer:
     # NACHRICHTEN EMPFANGEN
     # ─────────────────────────────────────────
 
-    def handle_message(self, conn):
+    def handle_message(self, conn, addr):
         try:
             conn.settimeout(3)
             data = conn.recv(16384)
@@ -377,17 +407,18 @@ class QuizServer:
             if msg.get("type") == "who_is_leader":
                 conn.sendall(json.dumps({
                     "leader_id": self.leader_id,
-                    "leader_port": self.leader_port
+                    "leader_port": self.leader_port,
+                    "leader_host": self.peers[self.leader_id]["host"]
                 }).encode())
                 return
 
-            self._process(msg)
+            self._process(msg, addr[0])
         except Exception:
             pass
         finally:
             conn.close()
 
-    def _process(self, msg):
+    def _process(self, msg, peer_host="127.0.0.1"):
         t = msg.get("type")
 
         # ─── Server ↔ Server ───
@@ -395,10 +426,11 @@ class QuizServer:
             with self.lock:
                 self.peers[msg["server_id"]] = {
                     "port": msg["port"],
+                    "host": peer_host,
                     "last_seen": time.time()
                 }
             print(f"[Discovery] ➕ Neuer Server: ID={msg['server_id']} Port={msg['port']}")
-            send_msg("127.0.0.1", msg["port"], {
+            send_msg(peer_host, msg["port"], {
                 "type": "welcome",
                 "server_id": self.server_id,
                 "port": self.port,
@@ -410,6 +442,7 @@ class QuizServer:
             with self.lock:
                 self.peers[msg["server_id"]] = {
                     "port": msg["port"],
+                    "host": peer_host,
                     "last_seen": time.time()
                 }
             if msg.get("leader_id"):
@@ -425,6 +458,7 @@ class QuizServer:
                 else:
                     self.peers[msg["server_id"]] = {
                         "port": msg["port"],
+                        "host": peer_host,
                         "last_seen": time.time()
                     }
 
@@ -466,17 +500,22 @@ class QuizServer:
 
                 self.game_state["players"][player_name] = {
                     "port": client_port,
+                    "host": msg.get("client_host", "127.0.0.1"),
                     "score": 0
                 }
                 num_players = len(self.game_state["players"])
 
             print(f"[Quiz] 👤 Neuer Spieler: '{player_name}' (insgesamt: {num_players})")
 
-            send_msg("127.0.0.1", client_port, {
-                "type": "joined",
-                "player_name": player_name,
-                "message": f"Willkommen {player_name}!"
-            })
+            send_msg(
+                msg.get("client_host", "127.0.0.1"),
+                client_port,
+                {
+                    "type": "joined",
+                    "player_name": player_name,
+                    "message": f"Willkommen {player_name}!"
+                }
+            )
 
             self._broadcast_to_players({
                 "type": "player_joined",
@@ -502,15 +541,41 @@ class QuizServer:
 
             print(f"[Quiz] 📝 {player_name} hat geantwortet: {'WAHR' if answer else 'FALSCH'}")
 
+    def discovery_listener(self):
+        """Lauscht auf UDP-Broadcasts und antwortet mit eigenen Server-Infos."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("0.0.0.0", DISCOVERY_PORT))
+        while True:
+            try:
+                data, addr = sock.recvfrom(4096)
+                msg = json.loads(data.decode())
+                if msg.get("type") == "discover_server":
+                    response = {
+                        "type": "server_present",
+                        "server_id": self.server_id,
+                        "port": self.port
+                    }
+                    sock.sendto(json.dumps(response).encode(), addr)
+            except Exception:
+                pass
+
+    def discovery_loop(self):
+        """Wiederholt regelmäßig die Discovery, um neue Server zu finden."""
+        while True:
+            time.sleep(30)
+            self.broadcast_presence()
+
     def listen_for_connections(self):
         """Hört auf eingehende TCP-Verbindungen."""
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(("", self.port))
+        server_sock.bind(("0.0.0.0", self.port))
         server_sock.listen(20)
         while True:
-            conn, _ = server_sock.accept()
-            threading.Thread(target=self.handle_message, args=(conn,), daemon=True).start()
+            conn, addr = server_sock.accept()
+            threading.Thread(target=self.handle_message, args=(conn, addr), daemon=True).start()
 
     # ─────────────────────────────────────────
     # START
@@ -522,6 +587,8 @@ class QuizServer:
             threading.Thread(target=self.send_heartbeats,        daemon=True),
             threading.Thread(target=self.check_for_failures,     daemon=True),
             threading.Thread(target=self.run_quiz,               daemon=True),
+            threading.Thread(target=self.discovery_listener, daemon=True),
+            threading.Thread(target=self.discovery_loop, daemon=True),
         ]
         for t in threads:
             t.start()
