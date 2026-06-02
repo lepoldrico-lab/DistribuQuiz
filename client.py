@@ -24,6 +24,8 @@ CLIENT_BASE_PORT = 60000      # Clients hören auf Ports 60000, 60001, ...
 # CLIENT-KLASSE
 # ─────────────────────────────────────────────
 
+SILENCE_TIMEOUT = 25   # Sekunden ohne Server-Nachricht → Reconnect
+
 class QuizClient:
     def __init__(self):
         self.player_name  = None
@@ -34,6 +36,7 @@ class QuizClient:
         self.has_answered = False
         self.connected    = False
         self.game_over    = False
+        self.last_message_time = time.time()
 
     def _find_free_port(self):
         """Sucht einen freien Port für den Client."""
@@ -101,6 +104,7 @@ class QuizClient:
 
     def _handle_server_message(self, msg):
         """Reagiert auf Nachrichten vom Server."""
+        self.last_message_time = time.time()
         t = msg.get("type")
 
         if t == "joined":
@@ -206,6 +210,39 @@ class QuizClient:
         print(f"\n  Drücke Enter zum Beenden...")
 
     # ─────────────────────────────────────────
+    # RECONNECT-WATCHDOG
+    # ─────────────────────────────────────────
+
+    def _watch_for_silence(self):
+        """Erkennt Server-Ausfall anhand von Stille und versucht Wiederverbindung."""
+        while not self.game_over:
+            time.sleep(3)
+            if not self.connected or self.game_over:
+                continue
+            if time.time() - self.last_message_time > SILENCE_TIMEOUT:
+                print(f"\n⚠️  Keine Antwort vom Server. Suche neuen Quiz Master...")
+                self._try_reconnect()
+
+    def _try_reconnect(self):
+        new_port = self.find_quiz_master()
+        if not new_port:
+            print(f"❌ Kein Quiz Master erreichbar. Versuche erneut...")
+            self.last_message_time = time.time()  # Reset, damit kein Spam
+            return
+        self.server_port = new_port
+        ok = self.send_to_server({
+            "type": "join_game",
+            "client_host": self.get_local_ip(),
+            "player_name": self.player_name,
+            "client_port": self.client_port
+        })
+        if ok:
+            print(f"🔄 Wiederverbindung zu Quiz Master auf Port {new_port} gesendet...")
+        else:
+            print(f"❌ Wiederverbindung fehlgeschlagen.")
+        self.last_message_time = time.time()  # Reset unabhängig vom Ergebnis
+
+    # ─────────────────────────────────────────
     # ANTWORT EINGEBEN
     # ─────────────────────────────────────────
 
@@ -284,6 +321,7 @@ class QuizClient:
 
         # Listener-Thread starten (für Server-Nachrichten)
         threading.Thread(target=self.listen_for_messages, daemon=True).start()
+        threading.Thread(target=self._watch_for_silence, daemon=True).start()
         time.sleep(0.3)
 
         # Beim Quiz beitreten
@@ -304,6 +342,8 @@ class QuizClient:
         if not self.connected:
             print("❌ Keine Antwort vom Quiz Master.")
             sys.exit(1)
+
+        self.last_message_time = time.time()  # Startpunkt für Silence-Watchdog
 
         # Hauptthread: Auf Spieler-Eingaben warten
         try:

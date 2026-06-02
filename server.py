@@ -183,12 +183,13 @@ class QuizServer:
             print(f"[Wahl] Quiz Master gewählt: Server {winner_id} (Port {winner_port})")
 
         with self.lock:
-            for sid, info in self.peers.items():
-                send_msg(info["host"], info["port"], {
-                    "type": "new_leader",
-                    "leader_id": winner_id,
-                    "leader_port": winner_port
-                })
+            peers_copy = dict(self.peers)
+        for sid, info in peers_copy.items():
+            send_msg(info["host"], info["port"], {
+                "type": "new_leader",
+                "leader_id": winner_id,
+                "leader_port": winner_port
+            })
 
     # ─────────────────────────────────────────
     # FAULT TOLERANCE: Heartbeat
@@ -415,6 +416,7 @@ class QuizServer:
         self._sync_to_backups()
 
         time.sleep(10)
+        do_sync = False
         with self.lock:
             if self.game_state["phase"] == "finished":
                 self.game_state = {
@@ -426,7 +428,9 @@ class QuizServer:
                     "question_start_time": 0
                 }
                 print(f"[Quiz] 🔄 Spiel zurückgesetzt — warte auf neue Spieler...")
-                self._sync_to_backups()
+                do_sync = True
+        if do_sync:
+            self._sync_to_backups()
 
     # ─────────────────────────────────────────
     # NACHRICHTEN EMPFANGEN
