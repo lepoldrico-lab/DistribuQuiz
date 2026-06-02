@@ -68,7 +68,8 @@ class QuizServer:
             "current_question_idx": -1,
             "current_question": None,
             "answers_this_round": {},
-            "question_start_time": 0
+            "question_start_time": 0,
+            "questions_order": []      # Gemischte Reihenfolge — wird an Backups gesynct
         }
 
         self.questions = self._load_questions()
@@ -274,7 +275,10 @@ class QuizServer:
 
     def _start_game(self):
         """Stellt nacheinander alle Fragen."""
-        random.shuffle(self.questions)
+        shuffled = list(self.questions)
+        random.shuffle(shuffled)
+        with self.lock:
+            self.game_state["questions_order"] = shuffled
         self._play_questions(start_idx=0)
 
     def _get_own_host(self):
@@ -290,7 +294,8 @@ class QuizServer:
     def _continue_game(self):
         """Wird von einem neu gewählten Quiz Master aufgerufen."""
         idx = self.game_state["current_question_idx"]
-        if idx < 0 or idx >= len(self.questions):
+        questions = self.game_state.get("questions_order") or []
+        if idx < 0 or idx >= len(questions):
             return
 
         print(f"[Quiz] 🛡️  Setze Spiel fort ab Frage {idx+1}")
@@ -307,12 +312,15 @@ class QuizServer:
 
     def _play_questions(self, start_idx):
         """Spielt alle Fragen ab start_idx."""
-        for idx in range(start_idx, len(self.questions)):
+        with self.lock:
+            questions = list(self.game_state.get("questions_order") or self.questions)
+
+        for idx in range(start_idx, len(questions)):
             if not self._is_quiz_master():
                 print(f"[Quiz] Bin nicht mehr Quiz Master — beende Spielleitung.")
                 return
 
-            frage = self.questions[idx]
+            frage = questions[idx]
 
             with self.lock:
                 self.game_state["phase"] = "question"
@@ -321,12 +329,12 @@ class QuizServer:
                 self.game_state["answers_this_round"] = {}
                 self.game_state["question_start_time"] = time.time()
 
-            print(f"\n[Quiz] ❓ Frage {idx+1}/{len(self.questions)}: {frage['frage']}")
+            print(f"\n[Quiz] ❓ Frage {idx+1}/{len(questions)}: {frage['frage']}")
 
             self._broadcast_to_players({
                 "type": "new_question",
                 "question_number": idx + 1,
-                "total_questions": len(self.questions),
+                "total_questions": len(questions),
                 "question": frage["frage"],
                 "time_limit": QUESTION_SEC
             })
@@ -425,7 +433,8 @@ class QuizServer:
                     "current_question_idx": -1,
                     "current_question": None,
                     "answers_this_round": {},
-                    "question_start_time": 0
+                    "question_start_time": 0,
+                    "questions_order": []
                 }
                 print(f"[Quiz] 🔄 Spiel zurückgesetzt — warte auf neue Spieler...")
                 do_sync = True
@@ -543,7 +552,8 @@ class QuizServer:
                         "current_question_idx": -1,
                         "current_question": None,
                         "answers_this_round": {},
-                        "question_start_time": 0
+                        "question_start_time": 0,
+                        "questions_order": []
                     }
                     print(f"[Quiz] 🔄 Neues Spiel gestartet (Spieler hat sich verbunden)")
 
@@ -568,7 +578,7 @@ class QuizServer:
                             q_data = {
                                 "type": "new_question",
                                 "question_number": self.game_state["current_question_idx"] + 1,
-                                "total_questions": len(self.questions),
+                                "total_questions": len(self.game_state.get("questions_order") or self.questions),
                                 "question": self.game_state["current_question"]["frage"],
                                 "time_limit": remaining
                             }
