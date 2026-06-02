@@ -525,6 +525,11 @@ class QuizServer:
 
             player_name = msg["player_name"]
             client_port = msg["client_port"]
+            client_host = msg.get("client_host", "127.0.0.1")
+
+            reject = False
+            reconnect_data = None
+            num_players = 0
 
             with self.lock:
                 if self.game_state["phase"] == "finished":
@@ -538,29 +543,68 @@ class QuizServer:
                     }
                     print(f"[Quiz] 🔄 Neues Spiel gestartet (Spieler hat sich verbunden)")
 
-                for p in self.game_state["players"].values():
+                existing_uid = None
+                for uid, p in self.game_state["players"].items():
                     if p["name"] == player_name:
-                        send_msg("127.0.0.1", client_port, {
-                            "type": "join_failed",
-                            "reason": "Name bereits vergeben."
-                        })
-                        return
+                        existing_uid = uid
+                        break
 
-                player_uid = str(uuid.uuid4())
+                if existing_uid is not None:
+                    if self.game_state["phase"] == "lobby":
+                        reject = True
+                    else:
+                        # Reconnect during running game: update address, restore score
+                        self.game_state["players"][existing_uid]["port"] = client_port
+                        self.game_state["players"][existing_uid]["host"] = client_host
+                        score = self.game_state["players"][existing_uid]["score"]
+                        q_data = None
+                        if self.game_state["phase"] == "question" and self.game_state["current_question"]:
+                            elapsed = time.time() - self.game_state["question_start_time"]
+                            remaining = max(1, int(QUESTION_SEC - elapsed))
+                            q_data = {
+                                "type": "new_question",
+                                "question_number": self.game_state["current_question_idx"] + 1,
+                                "total_questions": len(self.questions),
+                                "question": self.game_state["current_question"]["frage"],
+                                "time_limit": remaining
+                            }
+                        reconnect_data = {"score": score, "q_data": q_data}
+                else:
+                    player_uid = str(uuid.uuid4())
+                    self.game_state["players"][player_uid] = {
+                        "name": player_name,
+                        "uid": player_uid,
+                        "port": client_port,
+                        "host": client_host,
+                        "score": 0
+                    }
+                    num_players = len(self.game_state["players"])
 
-                self.game_state["players"][player_uid] = {
-                    "name": player_name,
-                    "uid": player_uid,
-                    "port": client_port,
-                    "host": msg.get("client_host", "127.0.0.1"),
-                    "score": 0
+            if reject:
+                send_msg(client_host, client_port, {
+                    "type": "join_failed",
+                    "reason": "Name bereits vergeben."
+                })
+                return
+
+            if reconnect_data is not None:
+                payload = {
+                    "type": "reconnected",
+                    "player_name": player_name,
+                    "score": reconnect_data["score"],
+                    "message": f"Willkommen zurück, {player_name}! Dein Punktestand: {reconnect_data['score']} Punkt(e)."
                 }
-                num_players = len(self.game_state["players"])
+                if reconnect_data["q_data"]:
+                    payload["current_question"] = reconnect_data["q_data"]
+                send_msg(client_host, client_port, payload)
+                self._sync_to_backups()
+                print(f"[Quiz] 🔄 Spieler '{player_name}' wieder verbunden (Score: {reconnect_data['score']})")
+                return
 
             print(f"[Quiz] 👤 Neuer Spieler: '{player_name}' (insgesamt: {num_players})")
 
             send_msg(
-                msg.get("client_host", "127.0.0.1"),
+                client_host,
                 client_port,
                 {
                     "type": "joined",

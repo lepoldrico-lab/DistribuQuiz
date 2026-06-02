@@ -108,6 +108,16 @@ class QuizClient:
             print(f"\n✅ {msg['message']}")
             print(f"⏳ Warte auf weitere Spieler...\n")
 
+        elif t == "reconnected":
+            self.connected = True
+            print(f"\n🔄 {msg['message']}")
+            if "current_question" in msg:
+                self.current_question = msg["current_question"]
+                self.has_answered = False
+                self._zeige_frage(msg["current_question"])
+            else:
+                print(f"⏳ Warte auf die nächste Frage...\n")
+
         elif t == "join_failed":
             print(f"\n❌ Beitritt fehlgeschlagen: {msg['reason']}")
             sys.exit(1)
