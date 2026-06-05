@@ -1,11 +1,10 @@
 """
-DistribuQuiz - Server (Web + Terminal)
-=======================================
+DistribuQuiz - Server (Web)
+============================
 Verteiltes Quiz-System mit:
-- 3 Servern (Discovery, Voting, Heartbeat, Fault Tolerance)
+- Mehreren Servern (Discovery, Voting, Heartbeat, Fault Tolerance)
 - Game-PIN System (Kahoot-Style)
 - Web-Interface (Browser-Spieler)
-- Terminal-Client (Backup-Variante)
 - WLAN-Support (mehrere Laptops)
 
 Starten:  python3 server.py
@@ -25,7 +24,7 @@ from urllib.parse import urlparse, parse_qs
 # KONFIGURATION
 # ─────────────────────────────────────────────
 
-SERVER_BASE_PORT = 50100      # Server-zu-Server + Terminal-Clients
+SERVER_BASE_PORT = 50100      # Server-zu-Server-Kommunikation
 WEB_BASE_PORT    = 8080       # Web-Interface
 DISCOVERY_PORT   = 50000      # UDP-Broadcast für WLAN-Discovery
 
@@ -54,14 +53,15 @@ def send_msg(host, port, data: dict):
 
 
 def get_local_ip():
-    """Findet die eigene IP im WLAN."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
+    except Exception as e:
+        print(f"⚠️  Konnte WLAN-IP nicht ermitteln ({e})")
+        print(f"   Server läuft nur lokal auf diesem Mac erreichbar (127.0.0.1)")
         return "127.0.0.1"
 
 
@@ -483,7 +483,7 @@ class QuizServer:
         # Quiz-Spielzustand (Backups erhalten Kopien davon!)
         self.game_state = {
             "phase": "lobby",
-            "players": {},                    # {name: {score, port (optional), is_web}}
+            "players": {},                    # {name: {score}}
             "current_question_idx": -1,
             "current_question": None,
             "answers_this_round": {},
@@ -522,6 +522,15 @@ class QuizServer:
             return []
         with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+
+    def _get_leaderboard(self):
+        """Gibt sortierte Spielerliste zurück (höchster Score zuerst).
+        Achtung: Aufrufer muss self.lock halten ODER eine Kopie übergeben."""
+        return sorted(
+            [(name, info["score"]) for name, info in self.game_state["players"].items()],
+            key=lambda x: x[1],
+            reverse=True
+        )
 
     # ─────────────────────────────────────────
     # DYNAMIC DISCOVERY (UDP-Broadcast für WLAN!)
@@ -580,8 +589,7 @@ class QuizServer:
         msg = {
             "type": "discovery_announce",
             "server_id": self.server_id,
-            "port": self.port,
-            "web_port": self.web_port
+            "port": self.port
         }
 
         # Auch lokal nochmal probieren (für Solo-Modus auf einem Mac)
@@ -640,14 +648,14 @@ class QuizServer:
     def _print_pin_banner(self):
         """Zeigt den Game-PIN groß im Terminal an."""
         print(f"\n")
-        print(f"  ╔══════════════════════════════════════╗")
-        print(f"  ║                                      ║")
-        print(f"  ║   🎮  GAME-PIN: {self.game_pin:<10}      ║")
-        print(f"  ║                                      ║")
-        print(f"  ║   Browser öffnen:                    ║")
-        print(f"  ║   http://{self.local_ip}:{self.web_port:<5}        ║")
-        print(f"  ║                                      ║")
-        print(f"  ╚══════════════════════════════════════╝")
+        print(f"  ╔═════════════════════════════════════════════╗")
+        print(f"  ║                                             ║")
+        print(f"  ║   🎮  GAME-PIN: {self.game_pin:<10}          ║")
+        print(f"  ║                                             ║")
+        print(f"  ║   Browser öffnen:                           ║")
+        print(f"  ║   http://{self.local_ip}:{self.web_port:<5} ║")
+        print(f"  ║                                             ║")
+        print(f"  ╚═════════════════════════════════════════════╝")
         print(f"\n")
 
     # ─────────────────────────────────────────
@@ -794,11 +802,7 @@ class QuizServer:
                 "answers": antworten
             }
 
-            rangliste = sorted(
-                [(name, info["score"]) for name, info in self.game_state["players"].items()],
-                key=lambda x: x[1],
-                reverse=True
-            )
+            rangliste = self._get_leaderboard()
 
         print(f"[Quiz] 📊 Richtige Antwort: {'WAHR' if korrekt else 'FALSCH'}")
         for i, (name, score) in enumerate(rangliste, 1):
@@ -809,12 +813,8 @@ class QuizServer:
     def _finish_game(self):
         with self.lock:
             self.game_state["phase"] = "finished"
+            rangliste = self._get_leaderboard()
 
-        rangliste = sorted(
-            [(name, info["score"]) for name, info in self.game_state["players"].items()],
-            key=lambda x: x[1],
-            reverse=True
-        )
         print(f"\n[Quiz] 🏆 Spiel beendet!")
         for i, (name, score) in enumerate(rangliste, 1):
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
@@ -837,13 +837,10 @@ class QuizServer:
             if self.game_state["phase"] != "lobby":
                 return False, "Spiel läuft bereits — bitte warten bis es vorbei ist."
 
-            self.game_state["players"][player_name] = {
-                "score": 0,
-                "is_web": True
-            }
+            self.game_state["players"][player_name] = {"score": 0}
             num = len(self.game_state["players"])
 
-        print(f"[Quiz] 👤 Web-Spieler beigetreten: '{player_name}' (insgesamt: {num})")
+        print(f"[Quiz] 👤 Spieler beigetreten: '{player_name}' (insgesamt: {num})")
         self._sync_to_backups()
         return True, None
 
@@ -862,12 +859,10 @@ class QuizServer:
         """Gibt Spielzustand zurück (was der Spieler sehen soll)."""
         with self.lock:
             phase = self.game_state["phase"]
-            players_list = sorted(
-                [{"name": n, "score": info["score"]}
-                 for n, info in self.game_state["players"].items()],
-                key=lambda x: x["score"],
-                reverse=True
-            )
+            players_list = [
+                {"name": name, "score": score}
+                for name, score in self._get_leaderboard()
+            ]
 
             result = {
                 "phase": phase,
@@ -927,15 +922,6 @@ class QuizServer:
             if not data:
                 return
             msg = json.loads(data.decode())
-
-            if msg.get("type") == "who_is_leader":
-                conn.sendall(json.dumps({
-                    "leader_id": self.leader_id,
-                    "leader_ip": self.leader_ip,
-                    "leader_port": self.leader_port
-                }).encode())
-                return
-
             self._process(msg, addr)
         except Exception:
             pass
@@ -1034,55 +1020,6 @@ class QuizServer:
             phase = self.game_state.get("phase", "?")
             num_players = len(self.game_state.get("players", {}))
             print(f"[Sync] 💾 State aktualisiert (Phase: {phase}, Spieler: {num_players})")
-
-        # Terminal-Client Nachrichten (Backup-Variante)
-        elif t == "join_game":
-            self._handle_terminal_join(msg)
-        elif t == "submit_answer":
-            self._handle_terminal_answer(msg)
-
-    def _handle_terminal_join(self, msg):
-        """Terminal-Client tritt bei."""
-        if not self._is_quiz_master():
-            return
-        player_name = msg["player_name"]
-        client_ip   = msg.get("client_ip", "127.0.0.1")
-        client_port = msg["client_port"]
-
-        with self.lock:
-            if player_name in self.game_state["players"]:
-                send_msg(client_ip, client_port, {
-                    "type": "join_failed",
-                    "reason": "Name bereits vergeben."
-                })
-                return
-            self.game_state["players"][player_name] = {
-                "score": 0,
-                "ip": client_ip,
-                "port": client_port,
-                "is_web": False
-            }
-            num = len(self.game_state["players"])
-
-        print(f"[Quiz] 👤 Terminal-Spieler: '{player_name}' (insgesamt: {num})")
-        send_msg(client_ip, client_port, {
-            "type": "joined",
-            "player_name": player_name
-        })
-        self._sync_to_backups()
-
-    def _handle_terminal_answer(self, msg):
-        if not self._is_quiz_master():
-            return
-        player_name = msg["player_name"]
-        answer = msg["answer"]
-        with self.lock:
-            if self.game_state["phase"] != "question":
-                return
-            if player_name not in self.game_state["players"]:
-                return
-            self.game_state["answers_this_round"][player_name] = answer
-        print(f"[Quiz] 📝 {player_name}: {'WAHR' if answer else 'FALSCH'}")
 
     def listen_for_connections(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
