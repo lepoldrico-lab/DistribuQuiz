@@ -265,6 +265,12 @@ class QuizClient:
             self.server_port = msg["leader_port"]
             self.server_host = msg.get("leader_host", self.server_host)
             print(f"\nConnecting to new Quiz Master on port {self.server_port}")
+            self.send_to_server({
+                "type": "join_game",
+                "client_host": self.get_local_ip(),
+                "player_name": self.player_name,
+                "client_port": self.client_port
+            })
 
         elif t == "player_joined":
             # Broadcast: another player has joined the lobby

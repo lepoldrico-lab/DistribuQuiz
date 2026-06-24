@@ -78,6 +78,9 @@ class QuizServer:
         self.peers = {}         # {server_id: {port, host, last_seen}}
         self.lock  = threading.Lock()
 
+        self._last_sync_phase        = None  # Used to suppress redundant [Sync] prints
+        self._last_sync_player_count = -1
+
         # Quiz game state — Backups keep a copy of this
         self.game_state = {
             "phase": "lobby",           # lobby | question | results | finished
@@ -171,15 +174,16 @@ class QuizServer:
     # 3. DISCOVERY — finding other servers
     # ─────────────────────────────────────────
 
-    def broadcast_presence(self):
+    def broadcast_presence(self, quiet=False):
         """
         Broadcasts presence via UDP to find other servers in the network.
-        Input: None
+        Input: quiet (bool) — when True, only logs newly discovered servers
         Calculation:
         Sends a UDP broadcast to DISCOVERY_PORT and collects responses from other servers.
         Output: None
         """
-        print("[Discovery] Searching for servers in the network...")
+        if not quiet:
+            print("[Discovery] Searching for servers in the network...")
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -201,18 +205,21 @@ class QuizServer:
                     continue
 
                 with self.lock:
+                    is_new = sid not in self.peers
                     self.peers[sid] = {
                         "port": msg["port"],
                         "host": addr[0],
                         "last_seen": time.time()
                     }
                 found += 1
-                print(f"[Discovery] Server found: ID={sid} IP={addr[0]} Port={msg['port']}")
+                if not quiet or is_new:
+                    print(f"[Discovery] Server found: ID={sid} IP={addr[0]} Port={msg['port']}")
 
             except socket.timeout:
                 break
 
-        print(f"[Discovery] {found} server(s) found")
+        if not quiet:
+            print(f"[Discovery] {found} server(s) found")
 
     def discovery_listener(self):
         """
@@ -243,12 +250,12 @@ class QuizServer:
         """
         Periodically re-broadcasts presence to discover newly started servers.
         Input: None
-        Calculation: Every 30 seconds, calls broadcast_presence.
+        Calculation: Every 60 seconds, quietly checks for new servers.
         Output: None
         """
         while True:
-            time.sleep(30)
-            self.broadcast_presence()
+            time.sleep(60)
+            self.broadcast_presence(quiet=True)
 
     # ─────────────────────────────────────────
     # 4. ELECTION / VOTING — choosing the Quiz Master
@@ -386,10 +393,17 @@ class QuizServer:
             msg = json.loads(data.decode())
 
             if msg.get("type") == "who_is_leader":
+                if not self.leader_id or not self.leader_port:
+                    conn.sendall(json.dumps({"leader_id": None, "leader_port": None}).encode())
+                    return
+                if self.leader_id == self.server_id:
+                    leader_host = self._get_own_host()
+                else:
+                    leader_host = self.peers.get(self.leader_id, {}).get("host", "127.0.0.1")
                 conn.sendall(json.dumps({
                     "leader_id":   self.leader_id,
                     "leader_port": self.leader_port,
-                    "leader_host": self.peers[self.leader_id]["host"]
+                    "leader_host": leader_host
                 }).encode())
                 return
 
@@ -470,7 +484,10 @@ class QuizServer:
                 self.game_state = msg["game_state"]
             phase       = self.game_state.get("phase", "?")
             num_players = len(self.game_state.get("players", {}))
-            print(f"[Sync] Game state updated (Phase: {phase}, Players: {num_players})")
+            if phase != self._last_sync_phase or num_players != self._last_sync_player_count:
+                print(f"[Sync] Game state updated (Phase: {phase}, Players: {num_players})")
+                self._last_sync_phase        = phase
+                self._last_sync_player_count = num_players
 
         # ── Client → Server ──────────────────────────────────────────
 
@@ -634,6 +651,7 @@ class QuizServer:
         random.shuffle(shuffled)
         with self.lock:
             self.game_state["questions_order"] = shuffled
+        self._sync_to_backups()
         self._play_questions(start_idx=0)
 
     def _play_questions(self, start_idx):
@@ -704,10 +722,31 @@ class QuizServer:
         """
         idx       = self.game_state["current_question_idx"]
         questions = self.game_state.get("questions_order") or []
-        if idx < 0 or idx >= len(questions):
+
+        if not questions or idx < 0:
+            # No recoverable question order — reset cleanly so clients can rejoin
+            print(f"[Quiz] Incomplete game state — resetting to lobby for new game")
+            with self.lock:
+                self.game_state = {
+                    "phase": "lobby",
+                    "players": {},
+                    "current_question_idx": -1,
+                    "current_question": None,
+                    "answers_this_round": {},
+                    "question_start_time": 0,
+                    "questions_order": []
+                }
+            self._sync_to_backups()
             return
 
-        print(f"[Quiz] Continuing game from question {idx+1}")
+        # If results were already shown for idx, start the NEXT question
+        start_idx = idx if self.game_state.get("phase") == "question" else idx + 1
+
+        if start_idx >= len(questions):
+            self._finish_game()
+            return
+
+        print(f"[Quiz] Continuing game from question {start_idx + 1}")
 
         self._broadcast_to_players({
             "type": "server_failover",
@@ -717,7 +756,7 @@ class QuizServer:
         })
 
         time.sleep(2)
-        self._play_questions(start_idx=idx)
+        self._play_questions(start_idx=start_idx)
 
     def _evaluate(self, question):
         """
