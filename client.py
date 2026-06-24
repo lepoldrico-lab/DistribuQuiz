@@ -13,47 +13,47 @@ import time
 import sys
 
 # ─────────────────────────────────────────────
-# KONFIGURATION
+# CONFIGURATION
 # ─────────────────────────────────────────────
 
-BASE_PORT        = 50100      # Server is running on Ports 50100, 50101, ...
-CLIENT_BASE_PORT = 60000      # Clients is running on Ports 60000, 60001, ...
+BASE_PORT        = 50100   # Servers run on ports 50100, 50101, ...
+CLIENT_BASE_PORT = 60000   # Clients run on ports 60000, 60001, ...
+SILENCE_TIMEOUT  = 25      # Seconds without server message before trying to reconnect
 
 
 # ─────────────────────────────────────────────
-# CLIENT-Class
+# MAIN CLASS: Client
 # ─────────────────────────────────────────────
-
-SILENCE_TIMEOUT = 25   # Seconds without server response before trying to reconnect
 
 class QuizClient:
+
+    # ─────────────────────────────────────────
+    # 1. INITIALIZATION
+    # ─────────────────────────────────────────
+
     def __init__(self):
         """
         Initializes the Quiz Client.
-        Sets up the necessary attributes for the client, 
-        including player name, client port, server host and port, 
-        current question, connection status, game over status and last message timestamp.    
+        Sets up player name, port, server connection info, and state flags.
         """
+        self.player_name      = None
+        self.client_port      = self._find_free_port()
+        self.has_answered     = False
 
-        # Client
-        self.player_name  = None # Player name
-        self.client_port  = self._find_free_port() # Port for incoming messages from the server
-        self.has_answered = False # Has the player already answered the current question?
-        # Server
-        self.server_host = None    # Host of the Quiz Master (leader)    
-        self.server_port  = None   # Port of the Quiz Master (leader)
-        self.current_question = None # Current question data (dict)
-        self.connected    = False # Is the client currently connected to the server?
-        self.game_over    = False # Has the game ended?
-        self.last_message_time = time.time() # Timestamp of the last message from the server (for reconnect watchdog)
+        self.server_host      = None
+        self.server_port      = None
+        self.current_question = None
+
+        self.connected         = False
+        self.game_over         = False
+        self.last_message_time = time.time()
 
     def _find_free_port(self):
         """
-        Search for a free port for the client.
+        Searches for a free port starting at CLIENT_BASE_PORT.
         Input: None
-        Calculation: Tries to bind to ports in the range CLIENT_BASE_PORT to CLIENT_BASE_PORT + 100
-        Output: Free port number (int)
-        Raises: RuntimeError if no free port is found
+        Calculation: Tries to bind ports CLIENT_BASE_PORT to CLIENT_BASE_PORT+100.
+        Output: int (free port number)
         """
         for p in range(CLIENT_BASE_PORT, CLIENT_BASE_PORT + 100):
             try:
@@ -63,16 +63,103 @@ class QuizClient:
                 return p
             except OSError:
                 continue
-        raise RuntimeError("Kein freier Port gefunden!")
+        raise RuntimeError("No free port found!")
+
+    def get_local_ip(self):
+        """
+        Returns the local IP address of the client.
+        Input: None
+        Output: str
+        """
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        except Exception:
+            return "127.0.0.1"
+        finally:
+            s.close()
+
+    # ─────────────────────────────────────────
+    # 2. STARTUP — entry point
+    # ─────────────────────────────────────────
+
+    def run(self):
+        """
+        Starts the Quiz Client.
+        Input: None
+        Calculation:
+        Prompts for player name, finds the Quiz Master, starts background threads,
+        joins the game, and enters the answer input loop.
+        Output: None
+        """
+        print("\n" + "="*55)
+        print("   DistribuQuiz — Player Client")
+        print("="*55)
+
+        # Step 1: Enter player name
+        while True:
+            name = input("\nHow do you want to be called? ").strip()
+            if name and len(name) <= 20:
+                self.player_name = name
+                break
+            print("   Please enter a valid name (max. 20 characters).")
+
+        # Step 2: Find the Quiz Master
+        print("\nSearching for Quiz Master...")
+        self.server_port = self.find_quiz_master()
+
+        if not self.server_port:
+            print("No Quiz Master found!")
+            print("   Make sure at least one server.py is running.")
+            sys.exit(1)
+
+        print(f"Quiz Master found on port {self.server_port}")
+
+        # Step 3: Start background threads
+        threading.Thread(target=self.listen_for_messages, daemon=True).start()
+        threading.Thread(target=self._watch_for_silence,  daemon=True).start()
+        time.sleep(0.3)
+
+        # Step 4: Join the quiz
+        print(f"\nJoining the quiz as '{self.player_name}'...")
+        self.send_to_server({
+            "type": "join_game",
+            "client_host": self.get_local_ip(),
+            "player_name": self.player_name,
+            "client_port": self.client_port
+        })
+
+        # Step 5: Wait for server confirmation
+        wait = 0
+        while not self.connected and wait < 5:
+            time.sleep(0.5)
+            wait += 0.5
+
+        if not self.connected:
+            print("No response from Quiz Master.")
+            sys.exit(1)
+
+        self.last_message_time = time.time()  # Start silence watchdog timer
+
+        # Step 6: Enter answer input loop (main thread)
+        try:
+            self.enter_answer()
+        except KeyboardInterrupt:
+            print("\n\nGoodbye!")
+
+    # ─────────────────────────────────────────
+    # 3. FIND THE QUIZ MASTER
+    # ─────────────────────────────────────────
 
     def find_quiz_master(self):
         """
-        Search for the Quiz Master by querying all ports.
+        Queries all known server ports to find the current Quiz Master.
         Input: None
-        Calculation: 
-        Tries to connect to ports in the range BASE_PORT to BASE_PORT + 20 and sends a "who_is_leader" message. 
-        If a response is received with the leader's port, it returns that port.
-        Output: Leader port (int) or None if not found        
+        Calculation:
+        Tries ports BASE_PORT to BASE_PORT+20, sends "who_is_leader",
+        and returns the leader's port if found.
+        Output: int (leader port) or None
         """
         for port in range(BASE_PORT, BASE_PORT + 20):
             try:
@@ -89,13 +176,16 @@ class QuizClient:
                 continue
         return None
 
+    # ─────────────────────────────────────────
+    # 4. SEND MESSAGES TO THE SERVER
+    # ─────────────────────────────────────────
+
     def send_to_server(self, data):
         """
-        Sends a message to the Quiz Master.
-        Input: data (dict) - The message to send to the server
-        Calculation:
-        Tries to connect to the server and send the JSON-encoded data.
-        Output: True if the message was sent successfully, False otherwise
+        Sends a JSON message to the Quiz Master.
+        Input: data (dict)
+        Calculation: Opens a TCP connection to the server and sends the JSON-encoded data.
+        Output: bool (True if successful)
         """
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -107,16 +197,16 @@ class QuizClient:
             return False
 
     # ─────────────────────────────────────────
-    # NACHRICHTEN VOM SERVER EMPFANGEN
+    # 5. RECEIVE MESSAGES FROM THE SERVER
     # ─────────────────────────────────────────
 
     def listen_for_messages(self):
         """
-        Listens for messages from the server (in a separate thread).
+        Listens for incoming messages from the server on the client's port.
         Input: None
         Calculation:
-        Creates a socket, binds it to the client's port, and listens for incoming connections. 
-        When a connection is accepted, it receives the data, decodes it from JSON, and passes it to the message handler.
+        Creates a TCP socket on client_port and for each connection
+        decodes the JSON and passes it to _handle_server_message.
         Output: None
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -139,60 +229,59 @@ class QuizClient:
 
     def _handle_server_message(self, msg):
         """
-        React on messages from the server.
-        Input: msg (dict) - The message received from the server
+        Reacts to messages from the server and updates client state.
+        Input: msg (dict)
         Calculation:
-        Updates the client's state based on the message type and content.
+        Dispatches each message type to the correct UI output or state update.
         Output: None
         """
         self.last_message_time = time.time()
         t = msg.get("type")
 
         if t == "joined":
-            # Successfully joined the game
+            # Successfully joined the lobby
             self.connected = True
             print(f"\n{msg['message']}")
-            print(f"Waiting for more Players...\n")
+            print(f"Waiting for more players...\n")
 
         elif t == "reconnected":
-            # Successfully reconnected to the game after a server failover
+            # Successfully reconnected after a server failover
             self.connected = True
             print(f"\n{msg['message']}")
             if "current_question" in msg:
                 self.current_question = msg["current_question"]
                 self.has_answered = False
-                self._zeige_question(msg["current_question"])
+                self._show_question(msg["current_question"])
             else:
                 print(f"Waiting for the next question...\n")
 
         elif t == "join_failed":
-            # Joining the game failed (e.g., name already taken)
+            # Server rejected the join (e.g. name already taken)
             print(f"\nJoining failed: {msg['reason']}")
             sys.exit(1)
 
         elif t == "redirect":
-            # Redirected to a new Quiz Master
+            # This server is a backup — connect to the real Quiz Master instead
             self.server_port = msg["leader_port"]
             self.server_host = msg.get("leader_host", self.server_host)
             print(f"\nConnecting to new Quiz Master on port {self.server_port}")
 
         elif t == "player_joined":
-            # A new player has joined the game
-            # Difference to "joined": This message is sent to all players when a new player joins, while "joined" is sent only to the player who just joined.
-            print(f"👤 '{msg['player_name']}' is joined (in total: {msg['total_players']} Players)")
+            # Broadcast: another player has joined the lobby
+            print(f"👤 '{msg['player_name']}' joined (total: {msg['total_players']} players)")
 
         elif t == "new_question":
-            # A new question has been sent by the server
+            # A new question has arrived
             self.current_question = msg
             self.has_answered = False
-            self._zeige_question(msg)
+            self._show_question(msg)
 
         elif t == "question_result":
-            # The result of the last question has been sent by the server
-            self._zeige_ergebnis(msg)
+            # The quiz master evaluated the last question
+            self._show_result(msg)
 
         elif t == "server_failover":
-            # The server has failed and a new Quiz Master has been elected
+            # The Quiz Master crashed — a new one took over
             print(f"\n{msg['message']}")
             if msg.get("leader_port"):
                 self.server_port = msg["leader_port"]
@@ -202,15 +291,17 @@ class QuizClient:
 
         elif t == "game_over":
             # The game has ended
-            self._zeige_endstand(msg)
+            self._show_final_standings(msg)
             self.game_over = True
 
-    def _zeige_question(self, msg):
+    # ─────────────────────────────────────────
+    # 6. DISPLAY — show questions and results
+    # ─────────────────────────────────────────
+
+    def _show_question(self, msg):
         """
-        Displays a new question.
-        Input: msg (dict) - The message containing the question data
-        Calculation:
-        Displays the question and its details to the user.
+        Displays a new question to the player.
+        Input: msg (dict)
         Output: None
         """
         print("\n" + "="*55)
@@ -221,246 +312,149 @@ class QuizClient:
         print(f"\n  Press [w] for TRUE or [f] for FALSE and press Enter")
         print("="*55)
 
-    def _zeige_ergebnis(self, msg):
+    def _show_result(self, msg):
         """
-        Displays the result of a question.
-        Input: msg (dict) - The message containing the question data
-        Calculation:
-        Displays the results and explanation to the user.
+        Displays the result of the last question.
+        Input: msg (dict)
         Output: None
         """
-        korrekt    = msg["correct_answer"]
-        meine_ant  = msg["your_answers"].get(self.player_name)
+        correct   = msg["correct_answer"]
+        my_answer = msg["your_answers"].get(self.player_name)
 
         print("\n" + "─"*55)
         print(f"  SOLUTION")
         print("─"*55)
-        print(f"  Correct Answer: {'TRUE' if korrekt else 'FALSE'}")
+        print(f"  Correct Answer: {'TRUE' if correct else 'FALSE'}")
 
-        if meine_ant is None:
+        if my_answer is None:
             print(f"  Your Answer:    Too late / not answered")
-        elif meine_ant == korrekt:
-            print(f"  Your Answer:    (+1 Point)")
+        elif my_answer == correct:
+            print(f"  Your Answer:    Correct! (+1 Point)")
         else:
-            print(f"  Your Answer:    Unfortunately wrong")
+            print(f"  Your Answer:    Wrong")
 
         print(f"\n  {msg['explanation']}")
 
         print(f"\nCurrent Leaderboard:")
-        # Display the leaderboard with player names and scores, marking the current player with "YOU".
         for i, (name, score) in enumerate(msg["leaderboard"], 1):
-            marker = " YOU" if name == self.player_name else ""
+            marker = " ← YOU" if name == self.player_name else ""
             print(f"     {i}. {name}: {score} Points{marker}")
         print("─"*55)
 
-    def _zeige_endstand(self, msg):
+    def _show_final_standings(self, msg):
         """
-        Displays the final standings.
-        Input: msg (dict) - The message containing the final score data
-        Calculation:
-        Displays the final standings and winner announcement.
+        Displays the final standings at the end of the game.
+        Input: msg (dict)
         Output: None
         """
         print("\n" + "="*55)
-        print(f"  !!!! GAME OVER !!!!")
+        print(f"  GAME OVER!")
         print("="*55)
         print(f"\n  FINAL SCORE:\n")
         for i, (name, score) in enumerate(msg["leaderboard"], 1):
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
-            marker = " YOU" if name == self.player_name else ""
+            medal  = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
+            marker = " ← YOU" if name == self.player_name else ""
             print(f"     {medal} {i}. {name}: {score} Points{marker}")
 
-        # Winner announcement
         if msg["leaderboard"]:
-            sieger, punkte = msg["leaderboard"][0]
-            print(f"\n  Winner: {sieger} with {punkte} Points!")
+            winner, points = msg["leaderboard"][0]
+            print(f"\n  Winner: {winner} with {points} Points!")
 
         print("="*55)
         print(f"\n  Press Enter to exit...")
 
     # ─────────────────────────────────────────
-    # RECONNECT-WATCHDOG
+    # 7. ANSWER INPUT — main game loop
+    # ─────────────────────────────────────────
+
+    def enter_answer(self):
+        """
+        Waits for player input and sends answers to the server.
+        Input: None
+        Calculation:
+        Reads stdin, validates input (w=TRUE, f=FALSE), and sends the answer to the server.
+        Output: None
+        """
+        while not self.game_over:
+            try:
+                raw = input().strip().lower()
+            except EOFError:
+                break
+
+            if self.game_over:
+                break
+
+            if self.current_question is None or self.has_answered:
+                continue
+
+            if raw in ["w", "wahr", "true", "t"]:
+                answer = True
+            elif raw in ["f", "falsch", "false"]:
+                answer = False
+            else:
+                print(f"  Please enter [w] for TRUE or [f] for FALSE.")
+                continue
+
+            success = self.send_to_server({
+                "type": "submit_answer",
+                "player_name": self.player_name,
+                "answer": answer
+            })
+
+            if success:
+                self.has_answered = True
+                print(f"  Your answer '{'TRUE' if answer else 'FALSE'}' has been sent.")
+                print(f"     Waiting for other players...")
+            else:
+                print(f"  Answer could not be sent!")
+
+    # ─────────────────────────────────────────
+    # 8. RECONNECT / FAULT TOLERANCE
     # ─────────────────────────────────────────
 
     def _watch_for_silence(self):
         """
-        Found Server-Crash during silence and tries to reconnect.
+        Monitors for server silence and triggers reconnect if needed.
         Input: None
         Calculation:
-        Monitors the connection for silence and attempts reconnection if necessary.
+        Every 3 seconds, checks if time since last server message exceeds SILENCE_TIMEOUT.
+        If so, calls _try_reconnect.
         Output: None
         """
         while not self.game_over:
             time.sleep(3)
-            # Check if the client is connected and the game is not over. 
             if not self.connected or self.game_over:
                 continue
-            # If the time since the last message exceeds the SILENCE_TIMEOUT, attempt to reconnect.
             if time.time() - self.last_message_time > SILENCE_TIMEOUT:
-                print(f"\n No response from server. Searching for a new Quiz Master...")
+                print(f"\nNo response from server. Searching for a new Quiz Master...")
                 self._try_reconnect()
 
     def _try_reconnect(self):
         """
-        Tries to reconnect to the Quiz Master.
+        Attempts to find a new Quiz Master and rejoin the game.
         Input: None
         Calculation:
-        Attempts to find a new Quiz Master and reconnect.
+        Calls find_quiz_master, then sends a join_game message to the new server.
         Output: None
         """
         new_port = self.find_quiz_master()
         if not new_port:
-            print(f"No Quiz Master available. Trying again...")
-            self.last_message_time = time.time()  # Reset Timeout, for no Spam
+            print(f"No Quiz Master available. Trying again later...")
+            self.last_message_time = time.time()
             return
         self.server_port = new_port
-        # Send a "join_game" message to the new Quiz Master with the player's details.
         ok = self.send_to_server({
-            "type": "join_game",                # Message Type
-            "client_host": self.get_local_ip(), # Client Host
-            "player_name": self.player_name,    # Player Name
-            "client_port": self.client_port     # Client Port
+            "type": "join_game",
+            "client_host": self.get_local_ip(),
+            "player_name": self.player_name,
+            "client_port": self.client_port
         })
         if ok:
             print(f"Reconnecting to Quiz Master on port {new_port}...")
         else:
             print(f"Reconnection failed.")
-        self.last_message_time = time.time()  # Reset not depending of Solution
-
-    # ─────────────────────────────────────────
-    # Typing Answer
-    # ─────────────────────────────────────────
-
-    def enter_client_solution(self):
-        """
-        Waiting for player inputs (main thread).
-        Input: None
-        Calculation:
-        Waits for the player to input their answer.
-        Output: None
-        """
-        while not self.game_over:
-            try:
-                eingabe = input().strip().lower() # strip = remove whitespace, lower = convert to lowercase
-            except EOFError:
-                break
-
-            if self.game_over: # If the game is over, exit the loop
-                break
-
-            # Only react when a question is currently active
-            if self.current_question is None or self.has_answered:
-                continue
-
-            # Validate the input and convert it to a boolean value
-            if eingabe in ["w", "wahr", "true", "t"]: 
-                answer = True
-            elif eingabe in ["f", "falsch", "false"]:
-                answer = False
-            else: # Invalid input, prompt the user again
-                print(f"  Please enter [w] for TRUE or [f] for FALSE.")
-                continue
-
-            # Send the answer to the server
-            success = self.send_to_server({
-                "type": "submit_answer",        # Message Type 
-                "player_name": self.player_name,# Player Name
-                "answer": answer               # Answer (True/False)
-            })
-
-            if success: # If the answer was sent successfully, mark the question as answered and inform the user
-                self.has_answered = True
-                print(f"  Your answer '{('TRUE' if answer else 'FALSE')}' has been sent.")
-                print(f"     Waiting for other players...")
-            else:
-                print(f"  Answer could not be sent!")
-    
-    def get_local_ip(self):
-        """
-        Returns the local IP address of the client.
-        Input: None
-        Output: str # Socket IP or Local IP address
-        """
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-        except:
-            return "127.0.0.1"
-        finally:
-            s.close()
-
-    # ─────────────────────────────────────────
-    # START
-    # ─────────────────────────────────────────
-
-    def run(self):
-        """
-        Starts the Quiz Client.
-        Input: None
-        Calculation:
-        Initializes the client, prompts for player name, finds the Quiz Master, and starts listening for messages.
-        Output: None
-        """
-        print("\n" + "="*55)
-        print("   DistribuQuiz — Player-Client")
-        print("="*55)
-
-        # Enter Player Name
-        while True:
-            name = input("\nHow do you want to be called? ").strip()
-            if name and len(name) <= 20:
-                self.player_name = name
-                break
-            print("   Please enter a valid name (max. 20 characters).")
-
-        # Find Quiz Master
-        print("\nSearching for Quiz Master...")
-        self.server_port = self.find_quiz_master()
-
-        if not self.server_port:
-            print("No Quiz Master found!")
-            print("   Make sure at least one server.py is running.")
-            sys.exit(1)
-
-        print(f"Quiz Master found on port {self.server_port}")
-
-        # Starting Listener-Thread (for Server-Messages) and Watchdog-Thread (for Reconnect)
-        threading.Thread(target=self.listen_for_messages, daemon=True).start()
-        threading.Thread(target=self._watch_for_silence, daemon=True).start()
-        time.sleep(0.3)
-
-        # Beim Quiz beitreten
-        print(f"\nJoining the quiz as '{self.player_name}'...")
-        self.send_to_server({
-            "type": "join_game",                
-            "client_host": self.get_local_ip(),
-            "player_name": self.player_name,
-            "client_port": self.client_port
-        })
-
-        # Waiting for Confirmation
-        wartezeit = 0
-        while not self.connected and wartezeit < 5:
-            time.sleep(0.5)
-            wartezeit += 0.5
-
-        if not self.connected:
-            print("No response from Quiz Master.")
-            sys.exit(1)
-
-        self.last_message_time = time.time()  # Starting Point for Silence-Watchdog
-
-        # Mainthread: Waiting for Player Inputs
-        try:
-            self.enter_client_solution()
-        except KeyboardInterrupt:
-            print("\n\nGoodbye!")
+        self.last_message_time = time.time()
 
 
 if __name__ == "__main__":
-    """
-    Main entry point for the Quiz Client.
-    Initializes and runs the QuizClient.
-    """
     QuizClient().run()
