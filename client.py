@@ -3,6 +3,17 @@ DistribuQuiz - Client (Player)
 ================================
 Connects to the Quiz Master and participates in the quiz.
 
+Communication model:
+  - The client scans server ports (TCP) and asks each one "who_is_leader?" until
+    it finds the Quiz Master.  It then sends all game messages (join, answer) to
+    that Quiz Master via TCP.
+  - The server pushes events (questions, results, failover) back to the client by
+    connecting to the CLIENT's own TCP listen port (reverse connection).  The client
+    therefore runs its own small TCP server in a background thread.
+  - A silence watchdog runs in a second background thread.  If no message arrives
+    for SILENCE_TIMEOUT seconds (Quiz Master likely crashed), it searches for the
+    new Quiz Master and rejoins automatically.
+
 Start:  python3 client.py
 """
 
@@ -119,7 +130,7 @@ class QuizClient:
         # Step 3: Start background threads
         threading.Thread(target=self.listen_for_messages, daemon=True).start()
         threading.Thread(target=self._watch_for_silence,  daemon=True).start()
-        time.sleep(0.3)
+        time.sleep(0.3)  # Give the listener thread time to bind and start accepting
 
         # Step 4: Join the quiz
         print(f"\nJoining the quiz as '{self.player_name}'...")
@@ -211,8 +222,8 @@ class QuizClient:
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("0.0.0.0", self.client_port))
-        sock.listen(5)
+        sock.bind(("0.0.0.0", self.client_port))  # 0.0.0.0 = all interfaces, so the server
+        sock.listen(5)                              # can reach us over the local network, not just localhost
 
         while True:
             try:
@@ -424,7 +435,9 @@ class QuizClient:
         Input: None
         Calculation:
         Every 3 seconds, checks if time since last server message exceeds SILENCE_TIMEOUT.
-        If so, calls _try_reconnect.
+        SILENCE_TIMEOUT (25 s) is intentionally larger than the server's TIMEOUT_SEC (15 s)
+        plus election time (~2 s), so the client waits long enough for a new Quiz Master to
+        be elected and resume the game before giving up and searching itself.
         Output: None
         """
         while not self.game_over:

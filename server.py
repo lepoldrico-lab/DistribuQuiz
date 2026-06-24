@@ -5,6 +5,18 @@ Distributed Quiz-System: Multiple Servers working together.
 One of them is Quiz Master (Leader), the others are Backups.
 When the Quiz Master fails, a Backup takes over automatically.
 
+Architecture overview:
+  - Discovery:   UDP broadcast on DISCOVERY_PORT — lightweight, connectionless.
+                 Servers announce themselves to the whole network without knowing addresses in advance.
+  - Game/Sync:   TCP on individual ports (BASE_PORT+) — reliable, ordered delivery for game events
+                 and state replication to backups.
+  - Client push: The server connects BACK to the client on the client's own listen port (60000+).
+                 This "reverse TCP" avoids the client needing a known address.
+  - Election:    Simplified Bully Algorithm — every server knows all peers; the one with the
+                 highest UUID wins and notifies the others. No rounds of messaging needed.
+  - Replication: The Quiz Master pushes its full game_state to all backups after every event,
+                 so any backup can instantly take over with zero data loss.
+
 Start:  python3 server.py
 """
 
@@ -76,7 +88,8 @@ class QuizServer:
         self.leader_port = None
 
         self.peers = {}         # {server_id: {port, host, last_seen}}
-        self.lock  = threading.Lock()
+        self.lock  = threading.Lock()  # Protects peers and game_state — both are read/written
+                                       # by multiple threads (heartbeat, quiz loop, message handler)
 
         self._last_sync_phase        = None  # Used to suppress redundant [Sync] prints
         self._last_sync_player_count = -1
@@ -158,6 +171,8 @@ class QuizServer:
         time.sleep(0.5)
         self.broadcast_presence()   # Find other servers in the network
 
+        # Wait 4 seconds for heartbeats to propagate and for any existing Quiz Master
+        # to send a new_leader notification.  Only start an election if still unknown.
         time.sleep(4)
         if self.leader_id is None:
             print("[Voting] No Quiz Master found → starting election...")
@@ -263,11 +278,15 @@ class QuizServer:
 
     def start_election(self):
         """
-        Elects the Quiz Master: server with the highest ID wins.
+        Elects the Quiz Master using a simplified Bully Algorithm.
         Input: None
         Calculation:
-        Collects all known server IDs, picks the highest, sets it as leader,
-        and notifies all peers.
+        Each server already knows all peers (via discovery + heartbeats), so no
+        election messages are exchanged.  Every participant simply picks the server
+        with the highest UUID as winner and announces the result via new_leader.
+        The server with the highest ID "bullies" the others into accepting it.
+        If this server wins AND it was not the leader before, it checks whether a
+        game is running and calls _continue_game to take over seamlessly.
         Output: None
         """
         print(f"\n[Voting] Election started! My ID: {self.server_id}")
@@ -331,7 +350,9 @@ class QuizServer:
         Input: None
         Calculation:
         Every HEARTBEAT_SEC seconds, checks last_seen for each peer.
-        If a peer exceeds TIMEOUT_SEC, it is considered failed and removed.
+        TIMEOUT_SEC (15 s) is 7× HEARTBEAT_SEC (2 s), so a server must miss
+        several consecutive heartbeats before being declared failed — this
+        tolerates brief network hiccups without triggering a false election.
         If the failed server was the Quiz Master, a new election starts.
         Output: None
         """
@@ -393,9 +414,12 @@ class QuizServer:
             msg = json.loads(data.decode())
 
             if msg.get("type") == "who_is_leader":
+                # Handled here (not in _process) because it needs a synchronous reply
+                # on the same connection — all other message types are fire-and-forget.
                 if not self.leader_id or not self.leader_port:
                     conn.sendall(json.dumps({"leader_id": None, "leader_port": None}).encode())
                     return
+                # The leader is not in its own peers dict, so handle that case separately
                 if self.leader_id == self.server_id:
                     leader_host = self._get_own_host()
                 else:
@@ -458,7 +482,9 @@ class QuizServer:
             threading.Thread(target=self.start_election, daemon=True).start()
 
         elif t == "heartbeat":
-            # Update last_seen timestamp for the sending server
+            # Update last_seen timestamp for the sending server.
+            # The else-branch is how new servers join the peer list without a
+            # separate handshake: once server A heartbeats to B, B adds A automatically.
             with self.lock:
                 if msg["server_id"] in self.peers:
                     self.peers[msg["server_id"]]["last_seen"] = time.time()
@@ -667,6 +693,9 @@ class QuizServer:
             questions = list(self.game_state.get("questions_order") or self.questions)
 
         for idx in range(start_idx, len(questions)):
+            # A new election can happen at any point (e.g. a higher-ID server joins).
+            # If this server lost leadership mid-game, stop immediately — the new
+            # Quiz Master will call _continue_game and take over.
             if not self._is_quiz_master():
                 print(f"[Quiz] No longer the Quiz Master — stopping game leadership.")
                 return
@@ -755,6 +784,8 @@ class QuizServer:
             "leader_host": self._get_own_host()
         })
 
+        # Give clients 2 seconds to receive the server_failover message and
+        # update their server_port before the first new question is sent.
         time.sleep(2)
         self._play_questions(start_idx=start_idx)
 
@@ -873,12 +904,17 @@ class QuizServer:
 
     def _sync_to_backups(self):
         """
-        Sends the current game state to all backup servers.
+        Sends the current game state to all backup servers (active replication).
         Input: None
+        Calculation:
+        A deep copy via JSON serialization is used so that subsequent changes to
+        game_state in other threads do not corrupt the message already being sent.
+        Backups replace their local state with this snapshot, ensuring they can
+        take over instantly if the Quiz Master fails.
         Output: None
         """
         with self.lock:
-            state_copy = json.loads(json.dumps(self.game_state))
+            state_copy = json.loads(json.dumps(self.game_state))  # deep copy
             peers_copy = dict(self.peers)
         for _, info in peers_copy.items():
             send_msg(info["host"], info["port"], {
