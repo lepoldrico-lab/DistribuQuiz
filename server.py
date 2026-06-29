@@ -171,9 +171,9 @@ class QuizServer:
         time.sleep(0.5)
         self.broadcast_presence()   # Find other servers in the network
 
-        # Wait 4 seconds for heartbeats to propagate and for any existing Quiz Master
+        # Wait for heartbeats to propagate and for any existing Quiz Master
         # to send a new_leader notification.  Only start an election if still unknown.
-        time.sleep(4)
+        time.sleep(6)
         if self.leader_id is None:
             print("[Voting] No Quiz Master found → starting election...")
             self.start_election()
@@ -189,49 +189,63 @@ class QuizServer:
     # 3. DISCOVERY — finding other servers
     # ─────────────────────────────────────────
 
-    def broadcast_presence(self, quiet=False):
+    def broadcast_presence(self, quiet=False, retries=3, retry_delay=1.0):
         """
         Broadcasts presence via UDP to find other servers in the network.
         Input: quiet (bool) — when True, only logs newly discovered servers
+               retries (int) — how many broadcast attempts to make if no servers found
+               retry_delay (float) — seconds to wait between retries
         Calculation:
         Sends a UDP broadcast to DISCOVERY_PORT and collects responses from other servers.
+        Retries multiple times so a new server reliably finds an existing cluster.
         Output: None
         """
         if not quiet:
             print("[Discovery] Searching for servers in the network...")
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(2)
-
-        sock.sendto(
-            json.dumps({"type": "discover_server"}).encode(),
-            ("255.255.255.255", DISCOVERY_PORT)
-        )
-
         found = 0
-        while True:
-            try:
-                data, addr = sock.recvfrom(4096)
-                msg = json.loads(data.decode())
+        for attempt in range(retries):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(2)
 
-                sid = msg["server_id"]
-                if sid == self.server_id:
-                    continue
+            sock.sendto(
+                json.dumps({"type": "discover_server"}).encode(),
+                ("255.255.255.255", DISCOVERY_PORT)
+            )
 
-                with self.lock:
-                    is_new = sid not in self.peers
-                    self.peers[sid] = {
-                        "port": msg["port"],
-                        "host": addr[0],
-                        "last_seen": time.time()
-                    }
-                found += 1
-                if not quiet or is_new:
-                    print(f"[Discovery] Server found: ID={sid} IP={addr[0]} Port={msg['port']}")
+            while True:
+                try:
+                    data, addr = sock.recvfrom(4096)
+                    msg = json.loads(data.decode())
 
-            except socket.timeout:
-                break
+                    sid = msg["server_id"]
+                    if sid == self.server_id:
+                        continue
+
+                    with self.lock:
+                        is_new = sid not in self.peers
+                        self.peers[sid] = {
+                            "port": msg["port"],
+                            "host": addr[0],
+                            "last_seen": time.time()
+                        }
+                    found += 1
+                    if not quiet or is_new:
+                        print(f"[Discovery] Server found: ID={sid} IP={addr[0]} Port={msg['port']}")
+
+                except socket.timeout:
+                    break
+
+            sock.close()
+
+            if found > 0:
+                break  # found servers — no need to retry
+
+            if attempt < retries - 1:
+                if not quiet:
+                    print(f"[Discovery] No response yet, retrying ({attempt + 2}/{retries})...")
+                time.sleep(retry_delay)
 
         if not quiet:
             print(f"[Discovery] {found} server(s) found")
