@@ -58,6 +58,7 @@ class QuizClient:
         self.connected         = False
         self.game_over         = False
         self.last_message_time = time.time()
+        self._failover_pending = False  # suppresses "Waiting..." during server failover
 
     def _find_free_port(self):
         """
@@ -263,8 +264,9 @@ class QuizClient:
                 self.current_question = msg["current_question"]
                 self.has_answered = False
                 self._show_question(msg["current_question"])
-            else:
+            elif not self._failover_pending:
                 print(f"Waiting for the next question...\n")
+            self._failover_pending = False
 
         elif t == "join_failed":
             # Server rejected the join (e.g. name already taken)
@@ -299,11 +301,11 @@ class QuizClient:
 
         elif t == "server_failover":
             # The Quiz Master crashed — a new one took over
+            self._failover_pending = True
             print(f"\n{msg['message']}")
             if msg.get("leader_port"):
                 self.server_port = msg["leader_port"]
                 self.server_host = msg.get("leader_host", self.server_host)
-                print(f"   Connecting to new Quiz Master on port {self.server_port}...")
                 # Re-register so the new Quiz Master has our current address.
                 # The synced player list may have a stale host/port if the old
                 # Quiz Master crashed before the last sync reached all backups.
@@ -313,7 +315,6 @@ class QuizClient:
                     "player_name": self.player_name,
                     "client_port": self.client_port
                 })
-            print(f"   Game will continue...\n")
 
         elif t == "game_over":
             # The game has ended

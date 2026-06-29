@@ -777,9 +777,18 @@ class QuizServer:
 
         print(f"[Quiz] Continuing game from question {start_idx + 1}")
 
+        # Set phase to "results" so that clients who rejoin in response to
+        # server_failover receive a clean "reconnected" without stale q_data.
+        # _play_questions will set the correct phase when it broadcasts the question.
+        with self.lock:
+            self.game_state["phase"] = "results"
+
+        with self.lock:
+            total = len(self.game_state.get("questions_order") or [])
+
         self._broadcast_to_players({
             "type": "server_failover",
-            "message": "Quiz Master has failed — new Quiz Master takes over!",
+            "message": f"Quiz Master has failed — new Quiz Master takes over!\n   Repeating question {start_idx + 1}/{total}...",
             "leader_port": self.port,
             "leader_host": self._get_own_host()
         })
