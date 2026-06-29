@@ -304,6 +304,15 @@ class QuizClient:
                 self.server_port = msg["leader_port"]
                 self.server_host = msg.get("leader_host", self.server_host)
                 print(f"   Connecting to new Quiz Master on port {self.server_port}...")
+                # Re-register so the new Quiz Master has our current address.
+                # The synced player list may have a stale host/port if the old
+                # Quiz Master crashed before the last sync reached all backups.
+                self.send_to_server({
+                    "type": "join_game",
+                    "client_host": self.get_local_ip(),
+                    "player_name": self.player_name,
+                    "client_port": self.client_port
+                })
             print(f"   Game will continue...\n")
 
         elif t == "game_over":
@@ -462,17 +471,18 @@ class QuizClient:
             self.last_message_time = time.time()
             return
         self.server_port = new_port
+        print(f"Reconnecting to Quiz Master on port {new_port}...")
         ok = self.send_to_server({
             "type": "join_game",
             "client_host": self.get_local_ip(),
             "player_name": self.player_name,
             "client_port": self.client_port
         })
-        if ok:
-            print(f"Reconnecting to Quiz Master on port {new_port}...")
-        else:
+        if not ok:
             print(f"Reconnection failed.")
-        self.last_message_time = time.time()
+        # Reset timer only on success; on failure the watchdog will retry sooner
+        if ok:
+            self.last_message_time = time.time()
 
 
 if __name__ == "__main__":
