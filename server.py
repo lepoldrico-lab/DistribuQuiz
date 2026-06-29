@@ -350,7 +350,7 @@ class QuizServer:
         Input: None
         Calculation:
         Every HEARTBEAT_SEC seconds, checks last_seen for each peer.
-        TIMEOUT_SEC (15 s) is 7× HEARTBEAT_SEC (2 s), so a server must miss
+        TIMEOUT_SEC (15 s) is 7x HEARTBEAT_SEC (2 s), so a server must miss
         several consecutive heartbeats before being declared failed — this
         tolerates brief network hiccups without triggering a false election.
         If the failed server was the Quiz Master, a new election starts.

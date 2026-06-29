@@ -326,7 +326,7 @@ class QuizClient:
         print("="*55)
         print(f"\n  {msg['question']}\n")
         print(f"  You have {msg['time_limit']} seconds!")
-        print(f"\n  Press [w] for TRUE or [f] for FALSE and press Enter")
+        print(f"\n  Press [t] for TRUE or [f] for FALSE and press Enter")
         print("="*55)
 
     def _show_result(self, msg):
@@ -404,12 +404,12 @@ class QuizClient:
             if self.current_question is None or self.has_answered:
                 continue
 
-            if raw in ["w", "wahr", "true", "t"]:
+            if raw in ["true", "t"]:
                 answer = True
             elif raw in ["f", "falsch", "false"]:
                 answer = False
             else:
-                print(f"  Please enter [w] for TRUE or [f] for FALSE.")
+                print(f"  Please enter [t] for TRUE or [f] for FALSE.")
                 continue
 
             success = self.send_to_server({
