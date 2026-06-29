@@ -11,8 +11,7 @@ It is inspired by platforms like Kahoot and allows multiple players to participa
 - **Students:**
   - Lorenz Böckle  
   - Hendrik Stolzke  
-  - Rico Lepold  
-  - (4th student name)
+  - Rico Lepold
 
 ---
 
