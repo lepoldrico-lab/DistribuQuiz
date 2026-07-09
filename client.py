@@ -23,12 +23,15 @@ import json
 import time
 import sys
 
+
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
-BASE_PORT        = 50100   # Servers run on ports 50100, 50101, ...
-CLIENT_BASE_PORT = 60000   # Clients run on ports 60000, 60001, ...
+BASE_PORT        = 5100    # Servers run on ports 5100, 5101, ... (must match server.py's BASE_PORT)
+CLIENT_BASE_PORT = 5200    # Clients run on ports 5200, 5201, ... — both ranges are kept below 49152
+                            # (Windows' dynamic/ephemeral port range) so they can't collide with
+                            # Hyper-V/WSL's rotating NAT port exclusions in that range.
 SILENCE_TIMEOUT  = 25      # Seconds without server message before trying to reconnect
 
 
@@ -48,6 +51,7 @@ class QuizClient:
         Sets up player name, port, server connection info, and state flags.
         """
         self.player_name      = None
+        self.player_uid       = None  # assigned by the Quiz Master on first join, reused on every reconnect
         self.client_port      = self._find_free_port()
         self.has_answered     = False
 
@@ -139,7 +143,8 @@ class QuizClient:
             "type": "join_game",
             "client_host": self.get_local_ip(),
             "player_name": self.player_name,
-            "client_port": self.client_port
+            "client_port": self.client_port,
+            "player_uid": self.player_uid
         })
 
         # Step 5: Wait for server confirmation
@@ -252,13 +257,15 @@ class QuizClient:
 
         if t == "joined":
             # Successfully joined the lobby
-            self.connected = True
+            self.connected  = True
+            self.player_uid = msg.get("player_uid")
             print(f"\n{msg['message']}")
             print(f"Waiting for more players...\n")
 
         elif t == "reconnected":
             # Successfully reconnected after a server failover
-            self.connected = True
+            self.connected  = True
+            self.player_uid = msg.get("player_uid", self.player_uid)
             print(f"\n{msg['message']}")
             if "current_question" in msg:
                 self.current_question = msg["current_question"]
@@ -282,7 +289,8 @@ class QuizClient:
                 "type": "join_game",
                 "client_host": self.get_local_ip(),
                 "player_name": self.player_name,
-                "client_port": self.client_port
+                "client_port": self.client_port,
+                "player_uid": self.player_uid
             })
 
         elif t == "player_joined":
@@ -313,7 +321,8 @@ class QuizClient:
                     "type": "join_game",
                     "client_host": self.get_local_ip(),
                     "player_name": self.player_name,
-                    "client_port": self.client_port
+                    "client_port": self.client_port,
+                    "player_uid": self.player_uid
                 })
 
         elif t == "game_over":
@@ -424,7 +433,7 @@ class QuizClient:
 
             success = self.send_to_server({
                 "type": "submit_answer",
-                "player_name": self.player_name,
+                "player_uid": self.player_uid,
                 "answer": answer
             })
 
@@ -477,7 +486,8 @@ class QuizClient:
             "type": "join_game",
             "client_host": self.get_local_ip(),
             "player_name": self.player_name,
-            "client_port": self.client_port
+            "client_port": self.client_port,
+            "player_uid": self.player_uid
         })
         if not ok:
             print(f"Reconnection failed.")

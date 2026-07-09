@@ -6,16 +6,16 @@ One of them is Quiz Master (Leader), the others are Backups.
 When the Quiz Master fails, a Backup takes over automatically.
 
 Architecture overview:
-  - Discovery:   UDP broadcast on DISCOVERY_PORT — lightweight, connectionless.
-                 Servers announce themselves to the whole network without knowing addresses in advance.
-  - Game/Sync:   TCP on individual ports (BASE_PORT+) — reliable, ordered delivery for game events
-                 and state replication to backups.
-  - Client push: The server connects BACK to the client on the client's own listen port (60000+).
-                 This "reverse TCP" avoids the client needing a known address.
-  - Election:    Simplified Bully Algorithm — every server knows all peers; the one with the
-                 highest UUID wins and notifies the others. No rounds of messaging needed.
-  - Replication: The Quiz Master pushes its full game_state to all backups after every event,
-                 so any backup can instantly take over with zero data loss.
+- Discovery:   UDP broadcast on DISCOVERY_PORT — lightweight, connectionless.
+                Servers announce themselves to the whole network without knowing addresses in advance.
+- Game/Sync:   TCP on individual ports (BASE_PORT+) — reliable, ordered delivery for game events
+                and state replication to backups.
+- Client push: The server connects BACK to the client on the client's own listen port (60000+).
+                This "reverse TCP" avoids the client needing a known address.
+- Election:    Simplified Bully Algorithm — every server knows all peers; the one with the
+                highest UUID wins and notifies the others. No rounds of messaging needed.
+- Replication: The Quiz Master pushes its full game_state to all backups after every event,
+                so any backup can instantly take over with zero data loss.
 
 Start:  python3 server.py
 """
@@ -27,13 +27,17 @@ import time
 import random
 import os
 import uuid
+import sys
 
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
 DISCOVERY_PORT  = 55000            # Broadcast port for server discovery
-BASE_PORT       = 50100            # Servers run on ports 50100, 50101, ...
+BASE_PORT       = 5100             # Servers run on ports 5100, 5101, ... — kept below 49152 (Windows'
+                                    # dynamic/ephemeral port range) so Hyper-V/WSL's NAT port exclusions
+                                    # can never land on it; ports above 49152 are excluded on a rotating
+                                    # basis and can make _find_free_port() fail with no code change at all.
 HEARTBEAT_SEC   = 2                # Every 2 sec: "I'm alive!"
 TIMEOUT_SEC     = 15               # After 15 sec without signal: server failed
 QUESTION_SEC    = 10               # How long players have per question
@@ -81,13 +85,13 @@ class QuizServer:
         Generates a unique server ID, finds a free port, initializes leader info, peer list, and game state.
         Output: None
         """
-        self.server_id = str(uuid.uuid4())
+        self.server_id = str(uuid.uuid4())  # random UUID — this server's unique ID / node identifier; the highest one wins the Bully election
         self.port      = self._find_free_port()
 
         self.leader_id   = None
         self.leader_port = None
 
-        self.peers = {}         # {server_id: {port, host, last_seen}}
+        self.peers = {}         # peer list / group view / membership table: {server_id: {port, host, last_seen}}
         self.lock  = threading.Lock()  # Protects peers and game_state — both are read/written
                                        # by multiple threads (heartbeat, quiz loop, message handler)
 
@@ -409,6 +413,7 @@ class QuizServer:
         server_sock.listen(20)
         while True:
             conn, addr = server_sock.accept()
+            # A short-lived thread per connection, separate from the fixed background threads above
             threading.Thread(target=self.handle_message, args=(conn, addr), daemon=True).start()
 
     def handle_message(self, conn, addr):
@@ -428,6 +433,7 @@ class QuizServer:
             msg = json.loads(data.decode())
 
             if msg.get("type") == "who_is_leader":
+                # This is the reply a client's port-scan (its discovery / lookup step) is waiting for
                 # Handled here (not in _process) because it needs a synchronous reply
                 # on the same connection — all other message types are fire-and-forget.
                 if not self.leader_id or not self.leader_port:
@@ -465,6 +471,9 @@ class QuizServer:
         # ── Server ↔ Server ──────────────────────────────────────────
 
         if t == "hello":
+            # Reserved for a future direct handshake/greeting; never actually sent or triggered —
+            # servers currently find each other via UDP broadcast_presence() instead, so this
+            # code path is effectively unused / a no-op today.
             # New server discovered: add to peers and send back a welcome
             with self.lock:
                 self.peers[msg["server_id"]] = {
@@ -482,6 +491,9 @@ class QuizServer:
             })
 
         elif t == "welcome":
+            # Would also re-trigger / restart an election when a peer's handshake reply comes in,
+            # but since "hello" above is never sent, this branch never actually runs or fires —
+            # the UDP-based discovery flow doesn't route through here.
             # Another server replied to our hello: add to peers, update leader if known
             with self.lock:
                 self.peers[msg["server_id"]] = {
@@ -543,10 +555,12 @@ class QuizServer:
             player_name = msg["player_name"]
             client_port = msg["client_port"]
             client_host = msg.get("client_host", "127.0.0.1")
+            client_uid  = msg.get("player_uid")  # None on a player's very first join
 
             reject         = False
             reconnect_data = None
             num_players    = 0
+            assigned_uid   = None
 
             with self.lock:
                 if self.game_state["phase"] == "finished":
@@ -561,42 +575,43 @@ class QuizServer:
                     }
                     print(f"[Quiz] New game started (player connected)")
 
-                existing_uid = None
-                for uid, p in self.game_state["players"].items():
-                    if p["name"] == player_name:
-                        existing_uid = uid
-                        break
+                # A returning client presents the UUID it was assigned on its first join —
+                # that UUID identifies "same player" across a reconnect, not the name.
+                existing_uid = client_uid if client_uid in self.game_state["players"] else None
 
                 if existing_uid is not None:
-                    if self.game_state["phase"] == "lobby":
-                        reject = True  # Name already taken in lobby
-                    else:
-                        # Reconnect during a running game: update address, keep score
-                        self.game_state["players"][existing_uid]["port"] = client_port
-                        self.game_state["players"][existing_uid]["host"] = client_host
-                        score  = self.game_state["players"][existing_uid]["score"]
-                        q_data = None
-                        if self.game_state["phase"] == "question" and self.game_state["current_question"]:
-                            elapsed   = time.time() - self.game_state["question_start_time"]
-                            remaining = max(1, int(QUESTION_SEC - elapsed))
-                            q_data = {
-                                "type": "new_question",
-                                "question_number": self.game_state["current_question_idx"] + 1,
-                                "total_questions": len(self.game_state.get("questions_order") or self.questions),
-                                "question": self.game_state["current_question"]["question"],
-                                "time_limit": remaining
-                            }
-                        reconnect_data = {"score": score, "q_data": q_data}
+                    # Reconnect (same UUID): update address, keep score
+                    self.game_state["players"][existing_uid]["port"] = client_port
+                    self.game_state["players"][existing_uid]["host"] = client_host
+                    score  = self.game_state["players"][existing_uid]["score"]
+                    q_data = None
+                    if self.game_state["phase"] == "question" and self.game_state["current_question"]:
+                        elapsed   = time.time() - self.game_state["question_start_time"]
+                        remaining = max(1, int(QUESTION_SEC - elapsed))
+                        q_data = {
+                            "type": "new_question",
+                            "question_number": self.game_state["current_question_idx"] + 1,
+                            "total_questions": len(self.game_state.get("questions_order") or self.questions),
+                            "question": self.game_state["current_question"]["question"],
+                            "time_limit": remaining
+                        }
+                    reconnect_data = {"uid": existing_uid, "score": score, "q_data": q_data}
                 else:
-                    player_uid = str(uuid.uuid4())
-                    self.game_state["players"][player_uid] = {
-                        "name": player_name,
-                        "uid": player_uid,
-                        "port": client_port,
-                        "host": client_host,
-                        "score": 0
-                    }
-                    num_players = len(self.game_state["players"])
+                    # No known UUID yet — a brand-new player. Only reject a name clash
+                    # while still in the lobby, before anyone has a UUID to tell players apart.
+                    name_taken = any(p["name"] == player_name for p in self.game_state["players"].values())
+                    if name_taken and self.game_state["phase"] == "lobby":
+                        reject = True
+                    else:
+                        assigned_uid = str(uuid.uuid4())
+                        self.game_state["players"][assigned_uid] = {
+                            "name": player_name,
+                            "uid": assigned_uid,
+                            "port": client_port,
+                            "host": client_host,
+                            "score": 0
+                        }
+                        num_players = len(self.game_state["players"])
 
             if reject:
                 send_msg(client_host, client_port, {
@@ -609,6 +624,7 @@ class QuizServer:
                 payload = {
                     "type": "reconnected",
                     "player_name": player_name,
+                    "player_uid": reconnect_data["uid"],
                     "score": reconnect_data["score"],
                     "message": f"Welcome back, {player_name}! Your score: {reconnect_data['score']} point(s)."
                 }
@@ -623,6 +639,7 @@ class QuizServer:
             send_msg(client_host, client_port, {
                 "type": "joined",
                 "player_name": player_name,
+                "player_uid": assigned_uid,
                 "message": f"Welcome {player_name}!"
             })
             self._broadcast_to_players({
@@ -636,20 +653,17 @@ class QuizServer:
             if not self._is_quiz_master():
                 return
 
-            player_name = msg["player_name"]
-            answer      = msg["answer"]
+            player_uid = msg.get("player_uid")
+            answer     = msg["answer"]
 
+            player_name = None
             with self.lock:
                 if self.game_state["phase"] != "question":
                     return
-                player_uid = None
-                for uid, p in self.game_state["players"].items():
-                    if p["name"] == player_name:
-                        player_uid = uid
-                        break
-                if player_uid is None:
+                if player_uid not in self.game_state["players"]:
                     return
                 self.game_state["answers_this_round"][player_uid] = answer
+                player_name = self.game_state["players"][player_uid]["name"]
 
             print(f"[Quiz] {player_name} answered: {'TRUE' if answer else 'FALSE'}")
 
