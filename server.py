@@ -28,7 +28,6 @@ Architecture overview:
                 and computes; backups just overwrite their state) — NOT active replication
                 (where every replica independently executes the same operations).
 
-Exam term quick-reference (search this file for the CAPS keyword to jump to the code):
 - UNICAST vs BROADCAST vs MULTICAST: send_msg() is unicast (one-to-one, TCP); UDP discovery
                 uses BROADCAST (one-to-all on the subnet, 255.255.255.255); _multicast_to_players()
                 is a multicast in the application sense (one-to-many) but is really a loop of
