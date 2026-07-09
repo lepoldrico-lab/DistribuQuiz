@@ -5,12 +5,20 @@ Distributed Quiz-System: Multiple Servers working together.
 One of them is Quiz Master (Leader), the others are Backups.
 When the Quiz Master fails, a Backup takes over automatically.
 
+This is a hybrid architecture: client-server between players and the Quiz Master,
+peer-to-peer among the servers themselves (every server talks directly to every
+other server, no fixed hierarchy besides the elected leader). Concurrency is
+handled with multithreading throughout — see the fixed background threads started
+in run(), plus one extra short-lived thread per accepted connection.
+
 Architecture overview:
 - Discovery:   UDP broadcast on DISCOVERY_PORT — lightweight, connectionless.
                 Servers announce themselves to the whole network without knowing addresses in advance.
+                This discovery mechanism is one-way (new server -> existing ones); see discovery_loop()
+                for when it re-runs, and find_quiz_master() in client.py for how clients discover servers.
 - Game/Sync:   TCP on individual ports (BASE_PORT+) — reliable, ordered delivery for game events
                 and state replication to backups.
-- Client push: The server connects BACK to the client on the client's own listen port (60000+).
+- Client push: The server connects BACK to the client on the client's own listen port (CLIENT_BASE_PORT+).
                 This "reverse TCP" avoids the client needing a known address.
 - Election:    Simplified Bully Algorithm — every server knows all peers; the one with the
                 highest UUID wins and notifies the others. No rounds of messaging needed.
@@ -39,7 +47,9 @@ BASE_PORT       = 5100             # Servers run on ports 5100, 5101, ... — ke
                                     # can never land on it; ports above 49152 are excluded on a rotating
                                     # basis and can make _find_free_port() fail with no code change at all.
 HEARTBEAT_SEC   = 2                # Every 2 sec: "I'm alive!"
-TIMEOUT_SEC     = 15               # After 15 sec without signal: server failed
+TIMEOUT_SEC     = 15               # After 15 sec without signal: server failed. Set well above
+                                    # HEARTBEAT_SEC so a single lost/omitted heartbeat (an omission
+                                    # fault) doesn't falsely trigger an election.
 QUESTION_SEC    = 10               # How long players have per question
 PAUSE_SEC       = 3                # Pause between questions (showing solution)
 MIN_PLAYERS     = 2                # Minimum number of players to start
@@ -364,7 +374,8 @@ class QuizServer:
 
     def check_for_failures(self):
         """
-        Checks regularly whether any server has stopped sending heartbeats.
+        This is the fault detection side of the heartbeat mechanism: checks regularly
+        whether any server has stopped sending heartbeats.
         Input: None
         Calculation:
         Every HEARTBEAT_SEC seconds, checks last_seen for each peer.
@@ -763,8 +774,9 @@ class QuizServer:
 
     def _continue_game(self):
         """
-        Called when a new Quiz Master is elected during a running game.
-        Continues the game from the last known question index.
+        The recovery strategy for a crashed Quiz Master: called when a new Quiz Master
+        is elected during a running game. Continues the game from the last known
+        question index instead of restarting from scratch.
         Input: None
         Calculation:
         Notifies players about the failover and resumes _play_questions from the current index.
@@ -923,7 +935,9 @@ class QuizServer:
 
     def _broadcast_to_players(self, message):
         """
-        Sends a message to all connected players.
+        Sends a message to all connected players. Despite "multicast" in the project
+        description, this is application-level fan-out over plain TCP unicast — one
+        send_msg() per player in a loop, not a real IP multicast socket/group address.
         Input: message (dict)
         Output: None
         """

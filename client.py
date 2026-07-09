@@ -1,7 +1,10 @@
 """
 DistribuQuiz - Client (Player)
 ================================
-Connects to the Quiz Master and participates in the quiz.
+Connects to the Quiz Master and participates in the quiz. From here it's a plain
+client-server relationship (the peer-to-peer side lives between the servers, see
+server.py) — concurrency on this side is just two background threads plus the
+main thread reading input, no per-connection threads needed.
 
 Communication model:
   - The client scans server ports (TCP) and asks each one "who_is_leader?" until
