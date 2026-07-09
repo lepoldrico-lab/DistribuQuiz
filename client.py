@@ -17,6 +17,24 @@ Communication model:
     for SILENCE_TIMEOUT seconds (Quiz Master likely crashed), it searches for the
     new Quiz Master and rejoins automatically.
 
+Exam term quick-reference (search this file for the CAPS keyword to jump to the code):
+- UNICAST: send_to_server() and every message the server sends back are one-to-one — see
+                send_msg() in server.py for the server-side twin of this pattern.
+- SYNCHRONOUS vs ASYNCHRONOUS: find_quiz_master() is a synchronous / blocking REQUEST-REPLY
+                (sendall then recv on the same connection, waiting for the answer). Everything
+                the client sends afterwards (join_game, submit_answer) is asynchronous /
+                fire-and-forget — send_to_server() never waits for or reads a reply.
+- PUSH vs PULL: find_quiz_master() is PULL-based discovery (the client actively scans/asks).
+                listen_for_messages() is the receiving end of PUSH-based delivery — the server
+                decides when to send a question/result, the client just reacts.
+- MARSHALLING / SERIALIZATION: json.dumps()/json.loads(), same role as in server.py.
+- FAILURE DETECTOR (client-side): _watch_for_silence() is a simple TIMEOUT-BASED failure
+                detector, like the server's heartbeat check_for_failures(), but purely passive
+                (no heartbeats are sent by the client — it just measures silence).
+- CLIENT-SIDE FAILOVER / RECONNECTION: _try_reconnect() and the "redirect"/"server_failover"
+                handlers implement the client half of the primary-backup FAILOVER story that
+                start_election()/_continue_game() implement on the server side.
+
 Start:  python3 client.py
 """
 
@@ -179,6 +197,9 @@ class QuizClient:
         Calculation:
         Tries ports BASE_PORT to BASE_PORT+20, sends "who_is_leader",
         and returns the leader's port if found.
+        This is PULL-based / client-initiated SERVICE DISCOVERY via PORT SCANNING over TCP
+        (CONNECTION-ORIENTED) — contrast with the servers' own discovery, which is PUSH/
+        BROADCAST-based over UDP (CONNECTIONLESS). Each probe is a SYNCHRONOUS request-reply.
         Output: int (leader port) or None
         """
         for port in range(BASE_PORT, BASE_PORT + 20):
@@ -205,6 +226,8 @@ class QuizClient:
         Sends a JSON message to the Quiz Master.
         Input: data (dict)
         Calculation: Opens a TCP connection to the server and sends the JSON-encoded data.
+        UNICAST, ASYNCHRONOUS / fire-and-forget, at-most-once delivery — the same characteristics
+        as send_msg() in server.py (see that docstring for the full explanation).
         Output: bool (True if successful)
         """
         try:
@@ -227,6 +250,9 @@ class QuizClient:
         Calculation:
         Creates a TCP socket on client_port and for each connection
         decodes the JSON and passes it to _handle_server_message.
+        This is the client acting as a small TCP SERVER (accept/listen) purely so the real
+        server can PUSH events to it — a REVERSE CONNECTION, used instead of the client
+        repeatedly POLLING the server for updates.
         Output: None
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -279,7 +305,9 @@ class QuizClient:
             self._failover_pending = False
 
         elif t == "redirect":
-            # This server is a backup — connect to the real Quiz Master instead
+            # This server is a backup — connect to the real Quiz Master instead.
+            # Client side of LEADER FORWARDING/REDIRECTION (see the "join_game" handler's
+            # comment in server.py) — the client, not the backup, does the extra hop.
             self.server_port = msg["leader_port"]
             self.server_host = msg.get("leader_host", self.server_host)
             print(f"\nConnecting to new Quiz Master on port {self.server_port}")
@@ -306,7 +334,9 @@ class QuizClient:
             self._show_result(msg)
 
         elif t == "server_failover":
-            # The Quiz Master crashed — a new one took over
+            # The Quiz Master crashed — a new one took over.
+            # Client-side notification of the server's FAILOVER (see start_election() /
+            # _continue_game() in server.py) — the client re-points itself at the new primary.
             self._failover_pending = True
             print(f"\n{msg['message']}")
             if msg.get("leader_port"):
@@ -448,7 +478,9 @@ class QuizClient:
 
     def _watch_for_silence(self):
         """
-        Monitors for server silence and triggers reconnect if needed.
+        Monitors for server silence and triggers reconnect if needed. This is a client-side,
+        purely passive TIMEOUT-BASED FAILURE DETECTOR — analogous to check_for_failures() on
+        the server, but the client sends no heartbeats itself, it only measures silence.
         Input: None
         Calculation:
         Every 3 seconds, checks if time since last server message exceeds SILENCE_TIMEOUT.
@@ -471,6 +503,9 @@ class QuizClient:
         Input: None
         Calculation:
         Calls find_quiz_master, then sends a join_game message to the new server.
+        This is the client-side RECONNECTION / FAILOVER RECOVERY step — the counterpart to the
+        server electing a new leader: once the client detects silence, it re-runs the same PULL-
+        based discovery it used on startup and re-registers with whichever server answers now.
         Output: None
         """
         new_port = self.find_quiz_master()

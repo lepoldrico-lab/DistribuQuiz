@@ -23,7 +23,46 @@ Architecture overview:
 - Election:    Simplified Bully Algorithm — every server knows all peers; the one with the
                 highest UUID wins and notifies the others. No rounds of messaging needed.
 - Replication: The Quiz Master pushes its full game_state to all backups after every event,
-                so any backup can instantly take over with zero data loss.
+                so any backup can instantly take over with zero data loss. This is PASSIVE
+                REPLICATION / the PRIMARY-BACKUP PROTOCOL (only the primary/leader executes
+                and computes; backups just overwrite their state) — NOT active replication
+                (where every replica independently executes the same operations).
+
+Exam term quick-reference (search this file for the CAPS keyword to jump to the code):
+- UNICAST vs BROADCAST vs MULTICAST: send_msg() is unicast (one-to-one, TCP); UDP discovery
+                uses BROADCAST (one-to-all on the subnet, 255.255.255.255); _multicast_to_players()
+                is a multicast in the application sense (one-to-many) but is really a loop of
+                unicasts — no IP multicast group address is used.
+- SYNCHRONOUS vs ASYNCHRONOUS communication: "who_is_leader" (handle_message) is a synchronous
+                / blocking request-reply — sender waits on recv() for the answer. Nearly every
+                other message (heartbeat, state_sync, join_game, ...) is asynchronous / fire-
+                and-forget — send_msg() does not wait for or read any application-level reply.
+- PUSH vs PULL: state_sync and heartbeats are PUSH-based (leader/peer proactively sends,
+                receiver does nothing to request it). find_quiz_master() in client.py is PULL-
+                based (client actively asks / scans for the leader).
+- MARSHALLING / SERIALIZATION: json.dumps() turns a Python dict into a byte stream for the
+                wire; json.loads() on the receiving side unmarshals / deserializes it back.
+- FAULT MODEL: this system assumes CRASH-STOP / FAIL-SILENT faults only (a server works
+                correctly or stops completely). It does NOT tolerate BYZANTINE FAULTS
+                (arbitrary, malicious, or corrupted behavior) — a compromised or buggy server
+                that lies (e.g. claims a false UUID or sends bad state_sync data) is not handled.
+- CONSISTENCY / CAP THEOREM: this design favors Availability over Consistency (an AP system).
+                There is no QUORUM or CONSENSUS protocol (e.g. Paxos/Raft) guarding the election
+                — during a NETWORK PARTITION each partition can independently elect its own
+                "highest UUID" leader, i.e. a SPLIT-BRAIN (two Quiz Masters at once) is possible.
+- SINGLE POINT OF FAILURE (SPOF): the Quiz Master is a SPOF for the game logic; the Backups +
+                election mechanism exist specifically to remove that SPOF (→ HIGH AVAILABILITY).
+- FULL MESH topology: every server maintains a connection-capable link to every other server
+                (via peers{}) — contrast with the STAR topology of the client-server side, where
+                all clients connect to one central Quiz Master.
+- MUTUAL EXCLUSION / CRITICAL SECTION: self.lock (threading.Lock) protects game_state and peers
+                from concurrent read/write by multiple threads — a classic local mutual-exclusion
+                mechanism, not a distributed one (no distributed mutual exclusion / no Ricart-
+                Agrawala etc. is used since only one process, the leader, ever writes canonical state).
+- PHYSICAL/WALL-CLOCK TIME vs LOGICAL CLOCKS: timestamps here (time.time(), last_seen,
+                question_start_time) are physical/wall-clock time. No LOGICAL CLOCKS (Lamport
+                timestamps) or VECTOR CLOCKS are used — ordering relies on TCP's own in-order,
+                reliable delivery per connection, not on causal/logical ordering across servers.
 
 Start:  python3 server.py
 """
@@ -65,6 +104,11 @@ def send_msg(host, port, data: dict):
     Sends a JSON message to another server or client.
     Input: host (str), port (int), data (dict)
     Calculation: Opens a TCP connection, sends the JSON-encoded data, and closes the connection.
+    This is UNICAST (one sender, one receiver) and ASYNCHRONOUS / FIRE-AND-FORGET — it never
+    reads a reply, so the caller only learns "did the send succeed", not "did the receiver
+    do anything with it". json.dumps() here is the MARSHALLING / SERIALIZATION step.
+    Delivery guarantee: at-most-once (TCP guarantees no duplication/corruption in transit, but
+    there is no retry here, so on failure the message is simply dropped — see the except below).
     Output: bool (True if sent successfully, False otherwise)
     """
     try:
@@ -102,8 +146,11 @@ class QuizServer:
         self.leader_port = None
 
         self.peers = {}         # peer list / group view / membership table: {server_id: {port, host, last_seen}}
-        self.lock  = threading.Lock()  # Protects peers and game_state — both are read/written
-                                       # by multiple threads (heartbeat, quiz loop, message handler)
+        self.lock  = threading.Lock()  # MUTUAL EXCLUSION lock: guards the CRITICAL SECTIONS that read/write
+                                       # peers and game_state — both are shared state touched by multiple
+                                       # threads (heartbeat, quiz loop, message handler) and would otherwise
+                                       # be subject to RACE CONDITIONS. This is local/in-process mutual
+                                       # exclusion only, not distributed mutual exclusion.
 
         self._last_sync_phase        = None  # Used to suppress redundant [Sync] prints
         self._last_sync_player_count = -1
@@ -212,6 +259,11 @@ class QuizServer:
         Calculation:
         Sends a UDP broadcast to DISCOVERY_PORT and collects responses from other servers.
         Retries multiple times so a new server reliably finds an existing cluster.
+        This is BROADCAST communication (one-to-all on the local subnet via 255.255.255.255)
+        over UDP (CONNECTIONLESS, unreliable — no delivery guarantee, no ordering, which is why
+        retries are needed here at the application level to approximate at-least-once delivery).
+        This is also SERVICE DISCOVERY: a new node finds existing group members without knowing
+        their addresses in advance (PULL-based from this server's point of view — it actively asks).
         Output: None
         """
         if not quiet:
@@ -270,6 +322,9 @@ class QuizServer:
         Input: None
         Calculation:
         Creates a UDP socket on DISCOVERY_PORT and answers "discover_server" messages.
+        This is the passive/server side of SERVICE DISCOVERY: it PUSHes a direct UNICAST reply
+        (sock.sendto(..., addr)) back to the asking node, even though the request itself arrived
+        via BROADCAST — a simple REQUEST-REPLY pattern layered on top of connectionless UDP.
         Output: None
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -294,6 +349,8 @@ class QuizServer:
         Periodically re-broadcasts presence to discover newly started servers.
         Input: None
         Calculation: Every 60 seconds, quietly checks for new servers.
+        This is POLLING (periodic active check) as opposed to an event-driven / PUSH mechanism —
+        a newly started server is only found once this loop's interval elapses, not instantly.
         Output: None
         """
         while True:
@@ -306,7 +363,7 @@ class QuizServer:
 
     def start_election(self):
         """
-        Elects the Quiz Master using a simplified Bully Algorithm.
+        Elects the Quiz Master using a simplified BULLY ALGORITHM (COORDINATOR ELECTION problem).
         Input: None
         Calculation:
         Each server already knows all peers (via discovery + heartbeats), so no
@@ -314,7 +371,11 @@ class QuizServer:
         with the highest UUID as winner and announces the result via new_leader.
         The server with the highest ID "bullies" the others into accepting it.
         If this server wins AND it was not the leader before, it checks whether a
-        game is running and calls _continue_game to take over seamlessly.
+        game is running and calls _continue_game to take over seamlessly (FAILOVER).
+        Classic Bully Algorithm sends ELECTION / OK(ANSWER) / COORDINATOR messages between
+        candidates; this variant skips straight to the COORDINATOR announcement (new_leader)
+        because membership is already known, trading message rounds for a small SPLIT-BRAIN
+        risk if the peer view is stale/partitioned (see module docstring, CAP theorem note).
         Output: None
         """
         print(f"\n[Voting] Election started! My ID: {self.server_id}")
@@ -359,6 +420,9 @@ class QuizServer:
         Sends "I'm alive" heartbeat messages to all peers every HEARTBEAT_SEC seconds.
         Input: None
         Calculation: Every HEARTBEAT_SEC seconds, sends a heartbeat to all known peers.
+        This is a PUSH-based / active HEARTBEAT PROTOCOL: every server proactively tells every
+        other server it's alive (ALL-TO-ALL, FULL MESH), as opposed to a PULL-based failure
+        detector where peers would have to ping/poll each other to check liveness.
         Output: None
         """
         while True:
@@ -374,8 +438,8 @@ class QuizServer:
 
     def check_for_failures(self):
         """
-        This is the fault detection side of the heartbeat mechanism: checks regularly
-        whether any server has stopped sending heartbeats.
+        This is the FAILURE DETECTOR side of the heartbeat mechanism (TIMEOUT-BASED / crash-stop
+        failure detection): checks regularly whether any server has stopped sending heartbeats.
         Input: None
         Calculation:
         Every HEARTBEAT_SEC seconds, checks last_seen for each peer.
@@ -416,6 +480,8 @@ class QuizServer:
         Calculation:
         Creates a TCP socket, binds to the server port, and for each connection
         starts a new thread to handle the message.
+        THREAD-PER-CONNECTION model over a CONNECTION-ORIENTED (TCP) socket — contrast with the
+        CONNECTIONLESS UDP sockets used for discovery, which need no accept()/listen() at all.
         Output: None
         """
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -445,8 +511,8 @@ class QuizServer:
 
             if msg.get("type") == "who_is_leader":
                 # This is the reply a client's port-scan (its discovery / lookup step) is waiting for
-                # Handled here (not in _process) because it needs a synchronous reply
-                # on the same connection — all other message types are fire-and-forget.
+                # Handled here (not in _process) because it needs a SYNCHRONOUS / blocking REQUEST-REPLY
+                # on the same connection — all other message types are ASYNCHRONOUS / fire-and-forget.
                 if not self.leader_id or not self.leader_port:
                     conn.sendall(json.dumps({"leader_id": None, "leader_port": None}).encode())
                     return
@@ -475,6 +541,9 @@ class QuizServer:
         Calculation:
         Dispatches server-to-server messages (hello, welcome, heartbeat, new_leader, state_sync)
         and client-to-server messages (join_game, submit_answer).
+        No RPC framework / MIDDLEWARE (e.g. gRPC, Java RMI) is used — this is a hand-rolled
+        MESSAGE-ORIENTED protocol: plain JSON dicts over raw TCP sockets, manually dispatched
+        by a "type" string field, i.e. a poor-man's remote method dispatch table.
         Output: None
         """
         t = msg.get("type")
@@ -542,7 +611,11 @@ class QuizServer:
                 print(f"[Voting] New Quiz Master: Server {self.leader_id}")
 
         elif t == "state_sync":
-            # Backup: replace local game state with the Quiz Master's state
+            # Backup: replace local game state with the Quiz Master's state.
+            # This is PASSIVE REPLICATION / the PRIMARY-BACKUP PROTOCOL in action — the backup
+            # does not re-execute any logic, it just overwrites its state with a fresh STATE
+            # TRANSFER from the primary (as opposed to OPERATION/LOG TRANSFER + re-execution,
+            # which is what ACTIVE REPLICATION / STATE MACHINE REPLICATION would do).
             with self.lock:
                 self.game_state = msg["game_state"]
             phase       = self.game_state.get("phase", "?")
@@ -555,7 +628,10 @@ class QuizServer:
         # ── Client → Server ──────────────────────────────────────────
 
         elif t == "join_game":
-            # Redirect to Quiz Master if this server is a backup
+            # Redirect to Quiz Master if this server is a backup.
+            # LEADER FORWARDING / REDIRECTION: a request that lands on a non-primary replica is
+            # bounced back to the client with the primary's address, rather than the backup
+            # silently handling (or dropping) it — typical of primary-backup systems.
             if not self._is_quiz_master():
                 send_msg("127.0.0.1", msg["client_port"], {
                     "type": "redirect",
@@ -779,7 +855,10 @@ class QuizServer:
         question index instead of restarting from scratch.
         Input: None
         Calculation:
-        Notifies players about the failover and resumes _play_questions from the current index.
+        Notifies players about the FAILOVER and resumes _play_questions from the current index.
+        This is only possible because of the passive replication in _sync_to_backups() — the
+        new primary already has a full copy of game_state, so no state is lost (a key benefit
+        of state-transfer replication over having no replication / a cold standby).
         Output: None
         """
         idx       = self.game_state["current_question_idx"]
@@ -936,8 +1015,9 @@ class QuizServer:
     def _multicast_to_players(self, message):
         """
         Sends a message to all connected players. Despite "multicast" in the project
-        description, this is application-level fan-out over plain TCP unicast — one
-        send_msg() per player in a loop, not a real IP multicast socket/group address.
+        description, this is application-level GROUP COMMUNICATION / fan-out over plain TCP
+        UNICAST — one send_msg() per player in a loop, not a real IP MULTICAST socket/group
+        address (no IGMP group join, no single "send once, subnet delivers to many" primitive).
         Input: message (dict)
         Output: None
         """
@@ -948,13 +1028,18 @@ class QuizServer:
 
     def _sync_to_backups(self):
         """
-        Sends the current game state to all backup servers (active replication).
+        Sends the current game state to all backup servers.
+        This is PASSIVE REPLICATION (the PRIMARY-BACKUP PROTOCOL): only the primary/leader ever
+        computes new state; backups are dumb followers that just overwrite their copy — NOT
+        active replication, where every replica would independently execute the same operations.
+        It is also a full STATE TRANSFER (whole game_state resent each time) rather than an
+        OPERATION/DELTA TRANSFER (sending just the diff) — simpler, at the cost of more bandwidth.
         Input: None
         Calculation:
-        A deep copy via JSON serialization is used so that subsequent changes to
+        A deep copy via JSON serialization (MARSHALLING) is used so that subsequent changes to
         game_state in other threads do not corrupt the message already being sent.
         Backups replace their local state with this snapshot, ensuring they can
-        take over instantly if the Quiz Master fails.
+        take over instantly if the Quiz Master fails (zero data loss failover).
         Output: None
         """
         with self.lock:
