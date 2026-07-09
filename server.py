@@ -646,7 +646,7 @@ class QuizServer:
                 "player_uid": assigned_uid,
                 "message": f"Welcome {player_name}!"
             })
-            self._broadcast_to_players({
+            self._multicast_to_players({
                 "type": "player_joined",
                 "player_name": player_name,
                 "total_players": num_players
@@ -743,7 +743,7 @@ class QuizServer:
 
             print(f"\n[Quiz] Question {idx+1}/{len(questions)}: {question['question']}")
 
-            self._broadcast_to_players({
+            self._multicast_to_players({
                 "type": "new_question",
                 "question_number": idx + 1,
                 "total_questions": len(questions),
@@ -819,7 +819,7 @@ class QuizServer:
         with self.lock:
             total = len(self.game_state.get("questions_order") or [])
 
-        self._broadcast_to_players({
+        self._multicast_to_players({
             "type": "server_failover",
             "message": f"Quiz Master has failed — new Quiz Master takes over!\n   Repeating question {start_idx + 1}/{total}...",
             "leader_port": self.port,
@@ -866,7 +866,7 @@ class QuizServer:
         for i, (name, score) in enumerate(leaderboard, 1):
             print(f"        {i}. {name}: {score} Points")
 
-        self._broadcast_to_players({
+        self._multicast_to_players({
             "type": "question_result",
             "correct_answer": correct,
             "explanation": question["explanation"],
@@ -897,7 +897,7 @@ class QuizServer:
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "  "
             print(f"        {medal} {i}. {name}: {score} Points")
 
-        self._broadcast_to_players({
+        self._multicast_to_players({
             "type": "game_over",
             "leaderboard": leaderboard
         })
@@ -933,7 +933,7 @@ class QuizServer:
         """
         return self.leader_id == self.server_id
 
-    def _broadcast_to_players(self, message):
+    def _multicast_to_players(self, message):
         """
         Sends a message to all connected players. Despite "multicast" in the project
         description, this is application-level fan-out over plain TCP unicast — one
