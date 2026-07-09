@@ -557,7 +557,6 @@ class QuizServer:
             client_host = msg.get("client_host", "127.0.0.1")
             client_uid  = msg.get("player_uid")  # None on a player's very first join
 
-            reject         = False
             reconnect_data = None
             num_players    = 0
             assigned_uid   = None
@@ -575,12 +574,19 @@ class QuizServer:
                     }
                     print(f"[Quiz] New game started (player connected)")
 
-                # A returning client presents the UUID it was assigned on its first join —
-                # that UUID identifies "same player" across a reconnect, not the name.
+                # Prefer the UUID the client already holds. Fall back to matching by name
+                # when it doesn't resolve — e.g. the client process was restarted (same
+                # terminal, same player) and lost its in-memory UUID — so the same human
+                # continues as the player they already were instead of being listed twice.
                 existing_uid = client_uid if client_uid in self.game_state["players"] else None
+                if existing_uid is None:
+                    for uid, p in self.game_state["players"].items():
+                        if p["name"] == player_name:
+                            existing_uid = uid
+                            break
 
                 if existing_uid is not None:
-                    # Reconnect (same UUID): update address, keep score
+                    # Reconnect: update address, keep score
                     self.game_state["players"][existing_uid]["port"] = client_port
                     self.game_state["players"][existing_uid]["host"] = client_host
                     score  = self.game_state["players"][existing_uid]["score"]
@@ -597,28 +603,15 @@ class QuizServer:
                         }
                     reconnect_data = {"uid": existing_uid, "score": score, "q_data": q_data}
                 else:
-                    # No known UUID yet — a brand-new player. Only reject a name clash
-                    # while still in the lobby, before anyone has a UUID to tell players apart.
-                    name_taken = any(p["name"] == player_name for p in self.game_state["players"].values())
-                    if name_taken and self.game_state["phase"] == "lobby":
-                        reject = True
-                    else:
-                        assigned_uid = str(uuid.uuid4())
-                        self.game_state["players"][assigned_uid] = {
-                            "name": player_name,
-                            "uid": assigned_uid,
-                            "port": client_port,
-                            "host": client_host,
-                            "score": 0
-                        }
-                        num_players = len(self.game_state["players"])
-
-            if reject:
-                send_msg(client_host, client_port, {
-                    "type": "join_failed",
-                    "reason": "Name already taken."
-                })
-                return
+                    assigned_uid = str(uuid.uuid4())
+                    self.game_state["players"][assigned_uid] = {
+                        "name": player_name,
+                        "uid": assigned_uid,
+                        "port": client_port,
+                        "host": client_host,
+                        "score": 0
+                    }
+                    num_players = len(self.game_state["players"])
 
             if reconnect_data is not None:
                 payload = {

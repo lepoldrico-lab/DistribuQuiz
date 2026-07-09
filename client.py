@@ -275,11 +275,6 @@ class QuizClient:
                 print(f"Waiting for the next question...\n")
             self._failover_pending = False
 
-        elif t == "join_failed":
-            # Server rejected the join (e.g. name already taken)
-            print(f"\nJoining failed: {msg['reason']}")
-            sys.exit(1)
-
         elif t == "redirect":
             # This server is a backup — connect to the real Quiz Master instead
             self.server_port = msg["leader_port"]
